@@ -115,7 +115,7 @@ placeholder (see "Unverified items" below).
 
 ## Data log
 
-**Status: new in 0.4.1, UNVERIFIED end-to-end** — built against the
+**Status: new in 0.4.1, verified once live on 2026-09-04 (tierwork:gate, haiku)** — built against the
 documented `SubagentStop` hook input fields (`session_id`,
 `transcript_path`, `cwd`, `hook_event_name`, and in sub-agent context
 `agent_id`, `agent_type`) at code.claude.com/docs/en/hooks, but not yet
@@ -166,6 +166,8 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
 ## Changelog
+
+- 0.4.2 (2026-09-04): log hook waits (<=2 s) for the sub-agent's final text record; SubagentStop was observed firing ~200 ms before it was flushed, leaving verdict/proceed empty. Live-verified once on tierwork:gate.
 
 - 0.4.1 (2026-09-04): SubagentStop hook appends one line per tierwork sub-agent to ~/.tierwork/reviews.jsonl (model, tokens, tool calls, verdict/confidence/needs_primary_review); bench/report.py aggregates it.
 - 0.4.0 (2026-09-04): removed gate diff sizing and per-spawn tiers; two opus

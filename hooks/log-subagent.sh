@@ -66,6 +66,19 @@ main() {
     fi
   fi
 
+  # SubagentStop can fire before the sub-agent's final text record is flushed
+  # (observed: hook at .16s, last record at .38s). Wait briefly until the last
+  # assistant record carries a text block, up to ~2s.
+  if [ -n "$agent_transcript" ]; then
+    local tries=0
+    while [ $tries -lt 5 ]; do
+      if jq -s '[.[] | select(.type=="assistant")] | last | .message.content? | select(type=="array") | map(select(.type=="text")) | length > 0' "$agent_transcript" 2>/dev/null | grep -q true; then
+        break
+      fi
+      sleep 0.4; tries=$((tries+1))
+    done
+  fi
+
   # Aggregate transcript stats with jq. All defaulted so a malformed or
   # missing transcript still produces a valid (mostly empty) record.
   local stats
