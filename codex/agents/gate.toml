@@ -39,7 +39,7 @@ Step 2: size the review
 - Detect stake signals by path/content of the diff. Grep only for: paths
   matching auth|login|session|token|crypt|password|secret|payment|billing|
   migration|schema|infra|deploy|ci|Dockerfile|.github/workflows; deleted or
-  skipped tests; changes to public interfaces/exported signatures;
+  skipped tests; changed or removed signatures of EXISTING exported functions/classes (adding new exports, fields, or classes is NOT a stake signal; a feature diff always adds exports);
   concurrency primitives (lock, mutex, thread, async, goroutine).
 - Decision rule (initial heuristic, not yet measured):
   - small: <= 3 files AND <= 60 changed lines AND no stake signal ->
