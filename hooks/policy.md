@@ -33,7 +33,9 @@
 - Deterministic checks gate LLM verdicts, never the reverse.
 
 Shipped agents (Claude only, scoped names):
-- `tierwork:gate` (haiku) — eligibility gate + CLAUDE.md file path listing.
+- `tierwork:gate` (haiku): eligibility, CLAUDE.md paths, and diff sizing; it
+  returns `review_tier` and `validation_tier`. Launch bug-hunter and
+  bug-validator with `model:` set to those tiers.
 - `tierwork:compliance-reviewer` (sonnet) — CLAUDE.md compliance audit.
 - `tierwork:bug-hunter` (opus) — diff-only or introduced-logic bug scanning.
 - `tierwork:bug-validator` (opus) — re-derives the verdict for one finding.

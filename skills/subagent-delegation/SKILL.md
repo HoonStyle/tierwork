@@ -103,6 +103,15 @@ guideline standardizes on. [claude-code code-review command]
    the issue: Opus for bugs and logic issues, Sonnet for CLAUDE.md violations.
 6. Keep only validated issues, then report.
 
+tierwork variant: step 1 also sizes the diff and returns `review_tier` /
+`validation_tier` (sonnet for small, low-stake diffs; opus when the diff is
+large or touches auth, payments, migrations, CI, concurrency, or public
+interfaces). The primary passes those as per-spawn `model` overrides.
+Rationale: a first measurement (README, Measurement log) showed opus
+validators on a 3-line diff cost more and ran ~9x slower than sonnet with
+identical findings; n=1, thresholds are initial heuristics to be tuned
+against further measurements.
+
 Reviewers are told to flag only high-signal issues: code that will not compile
 or parse, code that will definitely produce wrong results, or an unambiguous
 CLAUDE.md violation where the exact rule can be quoted. Style, input-dependent

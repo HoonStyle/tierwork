@@ -12,7 +12,9 @@ ships:
 - Four agent definitions for Claude Code (`gate`, `compliance-reviewer`,
   `bug-hunter`, `bug-validator`), modeled on the claude-code repo's
   `/code-review` command pattern (Haiku gate, Sonnet compliance, Opus bug
-  finder, Opus validator).
+  finder, Opus validator). The gate also sizes the diff and returns
+  `review_tier`/`validation_tier`, used as per-spawn model overrides for
+  bug-hunter/bug-validator.
 - Template Codex sub-agent `.toml` files with the same instructions, for
   manual copy into a project's `.codex/agents/` (Codex does not load plugin
   agent definitions automatically).
@@ -130,6 +132,11 @@ placeholder (see "Unverified items" below).
 - 0.1.0 (2026-09-04): initial release. Cost rules added; bug-validator runs
   deterministic checks before LLM judgment (arXiv:2609.02246); deterministic
   checks are a hard gate; discovered-context reuse rule; versioning rule.
+- 0.2.0 (2026-09-04): gate sizes the diff and returns review_tier/validation_tier;
+  primary passes them as per-spawn model overrides. Thresholds: small <=3
+  files/<=60 lines -> sonnet+sonnet; medium <=10 files/<=400 lines ->
+  opus+sonnet; large or any stake signal -> opus+opus. Motivated by the n=1
+  measurement; thresholds unmeasured.
 
 ## Measurement log
 
