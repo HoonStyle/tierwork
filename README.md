@@ -139,6 +139,15 @@ run to a local log file.
   (per-`agent_type` counts/models/tokens, bug-validator verdict
   distribution and `needs_primary_review` share, per-day counts). With no
   argument it reads `TIERWORK_LOG` or `~/.tierwork/reviews.jsonl`.
+- **Status: new, not yet used for a real labeling pass.** `bench/dashboard.py`
+  serves a local, browser-based view of the same log — stat tiles, a couple
+  of charts, and a table with buttons to label `tierwork:bug-validator` rows
+  as true/false positive or unclear for later review. Run it with
+  `python3 bench/dashboard.py [--log ~/.tierwork/reviews.jsonl] [--labels ~/.tierwork/labels.jsonl] [--port 8765]`
+  and open the printed URL. It's stdlib-only, binds to `127.0.0.1` only, and
+  makes no external network calls of any kind; labels you add go to
+  `~/.tierwork/labels.jsonl` by default, kept separate from the hook-written
+  log. See `bench/README.md`'s "Dashboard" section for routes and details.
 
 ## Bench
 
@@ -166,6 +175,8 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
 ## Changelog
+
+- 0.4.3 (2026-09-04): bench/dashboard.py — local (127.0.0.1) dashboard over reviews.jsonl with stat tiles, tokens by agent type, tokens over time, run table, and manual true/false-positive labels saved to ~/.tierwork/labels.jsonl. Rendering checked once with headless Chrome.
 
 - 0.4.2 (2026-09-04): log hook waits (<=2 s) for the sub-agent's final text record; SubagentStop was observed firing ~200 ms before it was flushed, leaving verdict/proceed empty. Live-verified once on tierwork:gate.
 
