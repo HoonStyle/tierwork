@@ -130,3 +130,26 @@ placeholder (see "Unverified items" below).
 - 0.1.0 (2026-09-04): initial release. Cost rules added; bug-validator runs
   deterministic checks before LLM judgment (arXiv:2609.02246); deterministic
   checks are a hard gate; discovered-context reuse rule; versioning rule.
+
+## Measurement log
+
+### 2026-09-04, n=1, same task with plugin off vs on
+
+Task: review a 3-line uncommitted diff with two planted bugs (undefined name,
+string typo) in a scratch repo; prompt and main model (`opus`) identical;
+`claude -p --output-format json`. Both runs found both bugs.
+
+| | plugin off | plugin on |
+|---|---|---|
+| sub-agents | 2 × sonnet (general-purpose) | 1 × `tierwork:bug-hunter` + 2 × `tierwork:bug-validator` (opus) |
+| output tokens (all models) | 10,488 | 11,236 |
+| cache read tokens | 1,276,776 | 621,413 |
+| reported cost (USD) | 0.83 | 0.98 |
+| wall time | 17 s | 154 s |
+
+Reading: on a tiny, low-stake diff the opus validators cost more than the
+sonnet baseline and were ~9x slower, with no difference in findings. This is
+one observation, not a trend. Confound: the baseline session already had a
+user-level instruction to delegate to sonnet, so it was not a naive baseline.
+Follow-up: make the gate agent size the validation tier by diff size and
+stake instead of always using opus validators.
