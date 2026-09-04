@@ -211,6 +211,8 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
+- 0.6.2 (2026-09-04): running rows are excluded from the tier cost table and bar (they carry no tokens or model yet).
+
 - 0.6.1 (2026-09-04): added `SubagentStart` hook (lightweight `status:
   "running"` record per sub-agent, written the moment it's spawned) and
   matching running-row support in the dashboard: merge rule is
