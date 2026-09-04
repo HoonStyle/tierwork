@@ -494,7 +494,7 @@ PAGE_HTML = r"""<!doctype html>
 
     var width = Math.max(480, types.length * 90 + 80);
     var height = 240;
-    var marginLeft = 60, marginBottom = 60, marginTop = 16, marginRight = 16;
+    var marginLeft = 60, marginBottom = 60, marginTop = 34, marginRight = 16;
     var plotW = width - marginLeft - marginRight;
     var plotH = height - marginTop - marginBottom;
     var maxVal = Math.max.apply(null, types.map(function (t) { return byType[t].total; })) || 1;
@@ -521,7 +521,7 @@ PAGE_HTML = r"""<!doctype html>
       label.textContent = Math.round(yv).toLocaleString();
       svg.appendChild(label);
     }
-    var axisLabel = svgEl("text", { x: 8, y: marginTop, class: "axis-label" });
+    var axisLabel = svgEl("text", { x: marginLeft - 8, y: 16, "text-anchor": "end", class: "axis-label" });
     axisLabel.textContent = "output tokens";
     svg.appendChild(axisLabel);
 
@@ -593,7 +593,7 @@ PAGE_HTML = r"""<!doctype html>
     types.forEach(function (t, i) { colorOf[t] = cssVar(lineSlots[i % lineSlots.length]); });
 
     var width = 720, height = 260;
-    var marginLeft = 70, marginBottom = 40, marginTop = 16, marginRight = 16;
+    var marginLeft = 70, marginBottom = 40, marginTop = 34, marginRight = 16;
     var plotW = width - marginLeft - marginRight;
     var plotH = height - marginTop - marginBottom;
 
@@ -626,7 +626,7 @@ PAGE_HTML = r"""<!doctype html>
       label.textContent = Math.round(yv).toLocaleString();
       svg.appendChild(label);
     }
-    var axisLabel = svgEl("text", { x: 8, y: marginTop, class: "axis-label" });
+    var axisLabel = svgEl("text", { x: marginLeft - 8, y: 16, "text-anchor": "end", class: "axis-label" });
     axisLabel.textContent = "output tokens";
     svg.appendChild(axisLabel);
 
