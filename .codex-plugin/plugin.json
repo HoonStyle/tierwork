@@ -1,6 +1,6 @@
 {
   "name": "tierwork",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Model-tier aware sub-agent delegation: policy hook, guideline skill, and gate/review/validate agents",
   "author": {
     "name": "HoonStyle"

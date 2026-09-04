@@ -131,6 +131,8 @@ placeholder (see "Unverified items" below).
 
 ## Changelog
 
+- 0.3.2 (2026-09-04): policy: validators must wait for the gate result and never use the default model (run E launched opus validators although gate returned sonnet).
+
 - 0.3.1 (2026-09-04): fix: removed `hooks` from `.claude-plugin/plugin.json`. Claude Code auto-loads `hooks/hooks.json`; naming it again in the manifest makes the loader report "Duplicate hooks file detected" and mark the plugin failed to load (seen on 0.2.1 and 0.3.0, macOS and Windows). Reported by the user from another machine.
 
 - 0.3.0 (2026-09-04): bug-validator maxTurns 12 (run D had a 30-turn

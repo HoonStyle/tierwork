@@ -40,8 +40,9 @@ including tiny diffs:
 3. If gate's `review_tier` > provisional tier (stake signal found), launch a
    second `bug-hunter` on opus with `lens: introduced-logic`; else skip it.
 4. `tierwork:bug-validator`, one per finding, `model: <validation_tier from
-   gate>`; starts only after hunter findings exist, hiding gate latency
-   behind the hunter.
+   gate>`. WAIT for the gate result before launching any validator; never
+   launch a validator with the default model. Gate latency is hidden behind
+   the hunter, so this wait is normally zero.
 - `tierwork:compliance-reviewer` (sonnet) — CLAUDE.md compliance audit.
 
 Before designing any fan-out of 3+ sub-agents, load the `subagent-delegation`
