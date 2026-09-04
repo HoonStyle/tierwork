@@ -45,23 +45,48 @@ Run it with:
 python3 bench/dashboard.py [--log ~/.tierwork/reviews.jsonl] [--labels ~/.tierwork/labels.jsonl] [--port 8765]
 ```
 
+`--log` may be given multiple times, and each value may be a file or a
+directory (directories are globbed non-recursively for `*.jsonl`, sorted for
+determinism). With no `--log` at all it falls back to `TIERWORK_LOG` or
+`~/.tierwork/reviews.jsonl`, same as before. Rows from all resolved files are
+loaded, each tagged with a `source` field (the basename of the file it came
+from), and de-duplicated across files by `session_id`+`agent_id`, keeping the
+row with the latest `ts`. `--labels` stays a single file — labels are always
+this machine's own labels file.
+
 then open the printed `http://127.0.0.1:<port>` URL. The page shows stat
 tiles (total runs, validator runs, confirmed share, `needs_primary_review`
 share, total output tokens, labeled share — computed the same way
 `bench/report.py` computes them, so the two should agree on the same log), a
 bar chart of output tokens per `agent_type` (colored by model tier), a
 line/dot chart of output tokens per run over time (colored by `agent_type`),
-and a table of every row, newest first.
+a table of every row (newest first), and — under the subtitle — a "Sources:"
+line listing the distinct `source` basenames actually present in the loaded
+data (or "No data loaded").
 
 Routes:
 
 - `GET /` — the dashboard page.
-- `GET /api/rows` — the log, JSON-decoded and merged with the latest label
-  (by `session_id`+`agent_id`) from the labels file. Malformed lines in
-  either file are skipped; a missing log or labels file is treated as empty.
+- `GET /api/rows` — the merged log (all `--log` sources, deduped) as JSON,
+  merged with the latest label (by `session_id`+`agent_id`) from the labels
+  file. Malformed lines in any file are skipped; a missing log or labels file
+  is treated as empty. Each row carries `source`, and label fields are
+  exposed as `label` / `label_note` / `label_ts`.
+- `GET /api/export.json` — the same merged rows as `/api/rows`, served as a
+  file download (`Content-Disposition: attachment`) named
+  `tierwork-export-<hostname>-<YYYYMMDD>.json`.
+- `GET /api/export.csv` — the same merged rows as CSV, fixed column order
+  `ts, session_id, agent_id, agent_type, spawn_model, models, msgs,
+  tool_calls, input_tokens, output_tokens, cache_read, cache_create,
+  verdict, confidence, needs_primary_review, proceed, description, cwd,
+  source, label, label_note, label_ts` (`models` joined with `|`; missing
+  fields empty), downloaded as
+  `tierwork-export-<hostname>-<YYYYMMDD>.csv`.
 - `POST /api/label` — body `{"session_id", "agent_id", "label", "note"}`
   with `label` one of `true_positive` / `false_positive` / `unclear`.
   Appends one JSON line (with a server-set `label_ts`) to the labels file.
+  (The on-disk labels file still uses the field name `note`; only the
+  merged/exported row output renames it to `label_note`.)
 
 `tierwork:bug-validator` rows in the table get true_positive/false_positive/
 unclear label buttons plus an optional note field, for manually reviewing
@@ -72,8 +97,45 @@ labeling never touches the hook-written log file.
 
 **Status: new, not yet used for a real labeling pass** — the server, routes,
 and rendering have been smoke-tested (`py_compile`, a live `curl` round-trip
-against `/api/rows` and `/api/label`), but no one has sat down and labeled a
-real batch of validator rows with it yet.
+against `/api/rows`, `/api/label`, `/api/export.json`, and `/api/export.csv`),
+but no one has sat down and labeled a real batch of validator rows with it
+yet.
+
+### Cross-machine merge (`bench/merge.py`)
+
+`bench/merge.py` combines review logs collected on different machines into
+one de-duped JSONL file, reusing the same file/directory expansion and
+`(session_id, agent_id)`-latest-`ts`-wins de-dup rule as `--log`. Stdlib
+only, does not start any server:
+
+```
+python3 bench/merge.py in1.jsonl [in2.jsonl|dir ...] -o merged.jsonl
+```
+
+Prints the number of input files, total rows read, and rows written after
+de-dup, and writes the merged rows (each tagged with `source`) as JSONL.
+
+Workflow for viewing two machines' data together:
+
+1. On machine A, export machine A's data — either run the dashboard there
+   and hit `/api/export.json` or `/api/export.csv` for a copy that carries
+   along that machine's labels, or just copy its raw
+   `~/.tierwork/reviews.jsonl`.
+2. Copy the exported/raw file to machine B.
+3. On machine B, merge it with machine B's own log and view both together:
+   ```
+   bench/merge.py <machineA-export> ~/.tierwork/reviews.jsonl -o merged.jsonl
+   python3 bench/dashboard.py --log merged.jsonl
+   ```
+   (or skip the merge step and pass both files directly with two `--log`
+   flags — `bench/dashboard.py` does the same dedup internally.)
+
+Labels are per-machine: each dashboard instance only ever reads labels from
+its own `--labels` file, so a raw `~/.tierwork/reviews.jsonl` copied between
+machines carries no labels. Once you've exported via `/api/export.json` or
+`/api/export.csv`, though, that machine's labels travel inside the exported
+rows' `label`/`label_note`/`label_ts` fields — no separate labels file needs
+to move, and `bench/merge.py`/`--log` will carry them straight through.
 
 ## Caveat
 

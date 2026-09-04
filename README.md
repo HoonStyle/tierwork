@@ -147,7 +147,12 @@ run to a local log file.
   and open the printed URL. It's stdlib-only, binds to `127.0.0.1` only, and
   makes no external network calls of any kind; labels you add go to
   `~/.tierwork/labels.jsonl` by default, kept separate from the hook-written
-  log. See `bench/README.md`'s "Dashboard" section for routes and details.
+  log. `--log` can be repeated and can point at a directory of `*.jsonl`
+  files, and the page can export the merged, de-duped data as
+  `/api/export.json`/`/api/export.csv` for moving between machines;
+  `bench/merge.py` merges exported/raw logs from multiple machines into one
+  de-duped JSONL file. See `bench/README.md`'s "Dashboard" section for
+  routes and the full cross-machine workflow.
 
 ## Bench
 

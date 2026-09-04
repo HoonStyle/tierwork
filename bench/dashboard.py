@@ -24,8 +24,11 @@ reads them, so shares shown here match report.py's numbers on the same log.
 """
 
 import argparse
+import csv
+import io
 import json
 import os
+import socket
 import sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -33,12 +36,90 @@ from pathlib import Path
 
 VALID_LABELS = {"true_positive", "false_positive", "unclear"}
 
+CSV_COLUMNS = [
+    "ts", "session_id", "agent_id", "agent_type", "spawn_model", "models",
+    "msgs", "tool_calls", "input_tokens", "output_tokens", "cache_read",
+    "cache_create", "verdict", "confidence", "needs_primary_review",
+    "proceed", "description", "cwd", "source", "label", "label_note",
+    "label_ts",
+]
+
 
 def default_log_path():
     env = os.environ.get("TIERWORK_LOG")
     if env:
         return env
     return "~/.tierwork/reviews.jsonl"
+
+
+def resolve_log_files(paths):
+    """Expand a list of --log values (files or directories) into a sorted,
+    deterministic list of files to load. Directories are globbed
+    non-recursively for *.jsonl."""
+    files = []
+    for p in paths:
+        path = Path(os.path.expanduser(str(p)))
+        if path.is_dir():
+            files.extend(sorted(path.glob("*.jsonl")))
+        else:
+            files.append(path)
+    return files
+
+
+def load_jsonl_multi(paths):
+    """Load rows from every resolved file, tagging each with source =
+    basename of the file it came from."""
+    rows = []
+    for path in resolve_log_files(paths):
+        for row in load_jsonl(path):
+            row = dict(row)
+            row["source"] = Path(path).name
+            rows.append(row)
+    return rows
+
+
+def _parse_ts(row):
+    ts = row.get("ts")
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def dedup_rows(rows):
+    """De-duplicate rows by (session_id, agent_id), keeping the row with the
+    latest parsed `ts`. Rows with a missing/unparseable ts are treated as the
+    lowest priority. On a tie (or comparison error), the later-loaded row
+    wins. Pure function, order of `rows` matters only as a tie-breaker."""
+    best = {}
+    order = {}
+    for i, row in enumerate(rows):
+        key = (row.get("session_id"), row.get("agent_id"))
+        parsed = _parse_ts(row)
+        current = best.get(key)
+        if current is None:
+            best[key] = row
+            order[key] = (parsed, i)
+            continue
+        cur_parsed, cur_i = order[key]
+        # None (unparseable) sorts as lowest priority; ties/later-loaded win.
+        take_new = False
+        if parsed is None and cur_parsed is None:
+            take_new = i >= cur_i
+        elif parsed is None:
+            take_new = False
+        elif cur_parsed is None:
+            take_new = True
+        elif parsed > cur_parsed:
+            take_new = True
+        elif parsed == cur_parsed:
+            take_new = i >= cur_i
+        if take_new:
+            best[key] = row
+            order[key] = (parsed, i)
+    return list(best.values())
 
 
 def load_jsonl(path: Path):
@@ -70,8 +151,11 @@ def load_labels(path: Path):
     return labels
 
 
-def merged_rows(log_path: Path, labels_path: Path):
-    rows = load_jsonl(log_path)
+def merged_rows(log_paths, labels_path: Path):
+    """log_paths: a single path or a list of paths (files or directories)."""
+    if isinstance(log_paths, (str, Path)):
+        log_paths = [log_paths]
+    rows = dedup_rows(load_jsonl_multi(log_paths))
     labels = load_labels(labels_path)
     out = []
     for r in rows:
@@ -80,17 +164,42 @@ def merged_rows(log_path: Path, labels_path: Path):
         lab = labels.get(key)
         if lab:
             row["label"] = lab.get("label")
-            row["note"] = lab.get("note")
+            row["label_note"] = lab.get("note")
             row["label_ts"] = lab.get("label_ts")
         else:
             row["label"] = None
-            row["note"] = None
+            row["label_note"] = None
             row["label_ts"] = None
         out.append(row)
     return out
 
 
-def make_handler(log_path: Path, labels_path: Path):
+def rows_to_csv(rows):
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_COLUMNS)
+    for row in rows:
+        vals = []
+        for col in CSV_COLUMNS:
+            if col == "models":
+                m = row.get("models")
+                if isinstance(m, list):
+                    vals.append("|".join(str(x) for x in m))
+                else:
+                    vals.append(str(m) if m else "")
+            else:
+                vals.append(row.get(col, ""))
+        writer.writerow(vals)
+    return buf.getvalue()
+
+
+def export_filename(ext: str) -> str:
+    host = socket.gethostname()
+    date = datetime.now().strftime("%Y%m%d")
+    return f"tierwork-export-{host}-{date}.{ext}"
+
+
+def make_handler(log_paths, labels_path: Path):
     class Handler(BaseHTTPRequestHandler):
         server_version = "TierworkDashboard/1"
 
@@ -115,13 +224,39 @@ def make_handler(log_path: Path, labels_path: Path):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_download(self, body: bytes, content_type: str, filename: str, status=200):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/?"):
                 self._send_html(PAGE_HTML)
             elif self.path == "/api/rows" or self.path.startswith("/api/rows?"):
                 try:
-                    rows = merged_rows(log_path, labels_path)
+                    rows = merged_rows(log_paths, labels_path)
                     self._send_json(rows)
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+            elif self.path == "/api/export.json":
+                try:
+                    rows = merged_rows(log_paths, labels_path)
+                    body = json.dumps(rows, ensure_ascii=False).encode("utf-8")
+                    self._send_download(
+                        body, "application/json; charset=utf-8", export_filename("json")
+                    )
+                except Exception as e:
+                    self._send_json({"error": str(e)}, status=500)
+            elif self.path == "/api/export.csv":
+                try:
+                    rows = merged_rows(log_paths, labels_path)
+                    body = rows_to_csv(rows).encode("utf-8")
+                    self._send_download(
+                        body, "text/csv; charset=utf-8", export_filename("csv")
+                    )
                 except Exception as e:
                     self._send_json({"error": str(e)}, status=500)
             else:
@@ -292,6 +427,15 @@ PAGE_HTML = r"""<!doctype html>
     cursor: pointer;
   }
   button:hover { border-color: var(--text-secondary); }
+  .toolbar a {
+    font: inherit;
+    color: inherit;
+    text-decoration: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+  }
+  .toolbar a:hover { border-color: var(--text-secondary); }
   .tiles {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -349,8 +493,11 @@ PAGE_HTML = r"""<!doctype html>
 <body>
   <h1>tierwork review dashboard</h1>
   <p class="sub">Local, read-only view of <code>~/.tierwork/reviews.jsonl</code> (+ optional labels file). No data leaves this machine.</p>
+  <p id="sources" class="sub"></p>
   <div class="toolbar">
     <button id="reload-btn" type="button">Reload</button>
+    <a href="/api/export.json">Export JSON</a>
+    <a href="/api/export.csv">Export CSV</a>
     <span id="status" style="color: var(--text-secondary);"></span>
   </div>
 
@@ -690,7 +837,7 @@ PAGE_HTML = r"""<!doctype html>
   function labelButtons(row) {
     if (row.agent_type !== "tierwork:bug-validator") return "";
     var current = row.label
-      ? '<span class="label-tag ' + esc(row.label) + '">' + esc(row.label) + (row.note ? ": " + esc(row.note) : "") + '</span>'
+      ? '<span class="label-tag ' + esc(row.label) + '">' + esc(row.label) + (row.label_note ? ": " + esc(row.label_note) : "") + '</span>'
       : "";
     var sid = esc(row.session_id);
     var aid = esc(row.agent_id);
@@ -775,12 +922,23 @@ PAGE_HTML = r"""<!doctype html>
     document.getElementById("status").textContent = msg || "";
   }
 
+  function renderSources() {
+    var sources = [];
+    state.rows.forEach(function (r) {
+      if (r.source && sources.indexOf(r.source) === -1) sources.push(r.source);
+    });
+    sources.sort();
+    var el = document.getElementById("sources");
+    el.textContent = sources.length ? "Sources: " + sources.join(", ") : "No data loaded";
+  }
+
   function renderAll() {
     var stats = computeStats(state.rows);
     renderTiles(stats);
     renderBarChart(state.rows);
     renderLineChart(state.rows);
     renderTable(state.rows);
+    renderSources();
   }
 
   function loadAndRender() {
@@ -813,15 +971,23 @@ PAGE_HTML = r"""<!doctype html>
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--log", default=default_log_path(), help="path to reviews.jsonl")
+    ap.add_argument(
+        "--log",
+        action="append",
+        default=None,
+        help="path to a reviews.jsonl file, or a directory of *.jsonl files "
+        "(non-recursive). May be given multiple times; defaults to "
+        "TIERWORK_LOG or ~/.tierwork/reviews.jsonl",
+    )
     ap.add_argument("--labels", default="~/.tierwork/labels.jsonl", help="path to labels.jsonl")
     ap.add_argument("--port", type=int, default=8765)
     args = ap.parse_args()
 
-    log_path = Path(os.path.expanduser(args.log))
+    log_arg_paths = args.log or [default_log_path()]
+    log_paths = [Path(os.path.expanduser(str(p))) for p in log_arg_paths]
     labels_path = Path(os.path.expanduser(args.labels))
 
-    handler = make_handler(log_path, labels_path)
+    handler = make_handler(log_paths, labels_path)
     server = HTTPServer(("127.0.0.1", args.port), handler)
     print(f"Serving at http://127.0.0.1:{args.port}")
     try:
