@@ -54,15 +54,23 @@ from), and de-duplicated across files by `session_id`+`agent_id`, keeping the
 row with the latest `ts`. `--labels` stays a single file — labels are always
 this machine's own labels file.
 
-then open the printed `http://127.0.0.1:<port>` URL. The page shows stat
-tiles (total runs, validator runs, confirmed share, `needs_primary_review`
-share, total output tokens, labeled share — computed the same way
-`bench/report.py` computes them, so the two should agree on the same log), a
-bar chart of output tokens per `agent_type` (colored by model tier), a
-line/dot chart of output tokens per run over time (colored by `agent_type`),
-a table of every row (newest first), and — under the subtitle — a "Sources:"
-line listing the distinct `source` basenames actually present in the loaded
-data (or "No data loaded").
+then open the printed `http://127.0.0.1:<port>` URL. The page ("tierwork
+mission control") loads real data from `/api/rows` on open and stays live
+after that via Server-Sent Events (`/api/events`) — no sample-data generator,
+no external fonts or CDN, all local fallback font stacks. It shows a KPI
+strip (sub-agent runs, validators confirmed, needs-primary-review share,
+output tokens, estimated cost, labeled share), review swimlanes (one lane per
+`agent_type`, an inline-SVG mark per run sized by output tokens and shaped/
+colored by model tier — haiku/sonnet/opus, with an "unknown" hollow-grey mark
+when the tier can't be determined from `spawn_model`/`models`), a live feed
+of recent runs, a tier cost bar (haiku/sonnet/opus list price per 1M output
+tokens — list price, not spend), a verdict funnel, and a runs table with
+inline TP/FP label buttons. A 24h / 7d / all segmented control filters
+everything client-side by `ts` and adapts the swimlane time-axis ticks to
+match. The server process itself is a `ThreadingHTTPServer` (rather than a
+plain `HTTPServer`) so a long-lived SSE connection doesn't block other
+requests. If the log(s) are empty, the swimlane panel shows an inline "No
+runs yet…" message instead of an empty chart, and the KPIs read "—".
 
 Routes:
 
@@ -72,6 +80,14 @@ Routes:
   file. Malformed lines in any file are skipped; a missing log or labels file
   is treated as empty. Each row carries `source`, and label fields are
   exposed as `label` / `label_note` / `label_ts`.
+- `GET /api/events` — a Server-Sent Events stream. Sends `event: hello` on
+  connect, then `event: rows` with a JSON array of newly appended (and
+  label-merged) rows whenever a background thread notices one of the `--log`
+  files has grown (polled once a second, byte-offset tracked per file — no
+  history replay, only rows appended after the server started). Sends a
+  `: ping` comment every 15s to keep idle connections alive. The page falls
+  back to polling `/api/rows` every 10s if the SSE connection drops, and
+  switches back to SSE automatically on reconnect.
 - `GET /api/export.json` — the same merged rows as `/api/rows`, served as a
   file download (`Content-Disposition: attachment`) named
   `tierwork-export-<hostname>-<YYYYMMDD>.json`.
@@ -88,18 +104,20 @@ Routes:
   (The on-disk labels file still uses the field name `note`; only the
   merged/exported row output renames it to `label_note`.)
 
-`tierwork:bug-validator` rows in the table get true_positive/false_positive/
-unclear label buttons plus an optional note field, for manually reviewing
-whether the validator's `verdict` was actually right. Labels are stored
-separately from the log itself, in `~/.tierwork/labels.jsonl` by default
-(append-only; the latest line for a given session_id+agent_id wins), so
-labeling never touches the hook-written log file.
+`tierwork:bug-validator` rows in the table get TP/FP label buttons, for
+manually reviewing whether the validator's `verdict` was actually right.
+Labels are stored separately from the log itself, in
+`~/.tierwork/labels.jsonl` by default (append-only; the latest line for a
+given session_id+agent_id wins), so labeling never touches the hook-written
+log file. A label posted from another tab shows up here on the next SSE
+`rows` event or reload.
 
 **Status: new, not yet used for a real labeling pass** — the server, routes,
 and rendering have been smoke-tested (`py_compile`, a live `curl` round-trip
-against `/api/rows`, `/api/label`, `/api/export.json`, and `/api/export.csv`),
-but no one has sat down and labeled a real batch of validator rows with it
-yet.
+against `/api/rows`, `/api/events`, `/api/label`, `/api/export.json`, and
+`/api/export.csv`, including appending a line to a watched log file and
+confirming it arrives as an `event: rows` SSE frame), but no one has sat down
+and labeled a real batch of validator rows with it yet.
 
 ### Cross-machine merge (`bench/merge.py`)
 

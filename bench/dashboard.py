@@ -7,14 +7,17 @@ Usage:
                         [--port 8765]
 
 Serves a single self-contained HTML page (stdlib http.server only, no
-third-party deps, no CDN or other external network calls) with stat tiles,
-two hand-built inline-SVG charts, and a sortable table of every logged
-tierwork sub-agent run. Binds to 127.0.0.1 only.
+third-party deps, no CDN or other external network calls, no Google Fonts)
+with a KPI strip, review swimlanes (inline SVG), a live feed, a tier cost
+bar, a verdict funnel, and a sortable table of every logged tierwork
+sub-agent run. Binds to 127.0.0.1 only.
 
 Routes:
     GET  /            the dashboard page
     GET  /api/rows    JSON array: log rows merged with the latest label
                        (by session_id+agent_id) from the labels file
+    GET  /api/events  Server-Sent Events stream of newly appended rows,
+                       polled from the --log file(s) every second
     POST /api/label   body {"session_id", "agent_id", "label", "note"};
                        appends one JSON line to the labels file
 
@@ -28,10 +31,13 @@ import csv
 import io
 import json
 import os
+import queue
 import socket
 import sys
+import threading
+import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VALID_LABELS = {"true_positive", "false_positive", "unclear"}
@@ -43,6 +49,11 @@ CSV_COLUMNS = [
     "proceed", "description", "cwd", "source", "label", "label_note",
     "label_ts",
 ]
+
+# How often the SSE background thread checks log files for new bytes.
+POLL_INTERVAL_SECONDS = 1.0
+# How often an idle SSE connection gets a comment-only keepalive ping.
+SSE_PING_SECONDS = 15.0
 
 
 def default_log_path():
@@ -151,6 +162,25 @@ def load_labels(path: Path):
     return labels
 
 
+def row_key(row):
+    """The dedup/identity key used everywhere a row needs to be addressed:
+    /api/rows dedup, label merge, and SSE de-dup against already-seen rows."""
+    return (row.get("session_id"), row.get("agent_id"))
+
+
+def _apply_label(row, labels):
+    lab = labels.get(row_key(row))
+    if lab:
+        row["label"] = lab.get("label")
+        row["label_note"] = lab.get("note")
+        row["label_ts"] = lab.get("label_ts")
+    else:
+        row["label"] = None
+        row["label_note"] = None
+        row["label_ts"] = None
+    return row
+
+
 def merged_rows(log_paths, labels_path: Path):
     """log_paths: a single path or a list of paths (files or directories)."""
     if isinstance(log_paths, (str, Path)):
@@ -160,16 +190,7 @@ def merged_rows(log_paths, labels_path: Path):
     out = []
     for r in rows:
         row = dict(r)
-        key = (row.get("session_id"), row.get("agent_id"))
-        lab = labels.get(key)
-        if lab:
-            row["label"] = lab.get("label")
-            row["label_note"] = lab.get("note")
-            row["label_ts"] = lab.get("label_ts")
-        else:
-            row["label"] = None
-            row["label_note"] = None
-            row["label_ts"] = None
+        _apply_label(row, labels)
         out.append(row)
     return out
 
@@ -199,9 +220,120 @@ def export_filename(ext: str) -> str:
     return f"tierwork-export-{host}-{date}.{ext}"
 
 
-def make_handler(log_paths, labels_path: Path):
+class LogTailer:
+    """Background poll thread: watches --log file(s) for appended bytes,
+    parses newly appended JSONL lines, merges them with labels the same way
+    /api/rows does, and fans the resulting row dicts out to every connected
+    SSE client as `event: rows` frames.
+
+    File growth is tracked by byte offset per resolved path. On startup each
+    file is baselined at its current size (no history replay over SSE --
+    /api/rows already serves the full history on initial page load).
+    """
+
+    def __init__(self, log_paths, labels_path: Path):
+        self.log_paths = log_paths
+        self.labels_path = labels_path
+        self._offsets = {}
+        self._clients = []
+        self._clients_lock = threading.Lock()
+        self._thread = None
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def add_client(self):
+        q = queue.Queue()
+        with self._clients_lock:
+            self._clients.append(q)
+        return q
+
+    def remove_client(self, q):
+        with self._clients_lock:
+            if q in self._clients:
+                self._clients.remove(q)
+
+    def _broadcast(self, event: str, data_obj):
+        payload = f"event: {event}\ndata: {json.dumps(data_obj, ensure_ascii=False)}\n\n"
+        with self._clients_lock:
+            clients = list(self._clients)
+        for q in clients:
+            try:
+                q.put_nowait(payload)
+            except Exception:
+                pass
+
+    def _run(self):
+        while True:
+            try:
+                self._poll_once()
+            except Exception:
+                # Never let a transient parse/IO error kill the poll thread.
+                pass
+            time.sleep(POLL_INTERVAL_SECONDS)
+
+    def _poll_once(self):
+        files = resolve_log_files(self.log_paths)
+        labels = None  # loaded lazily, once, only if some file actually grew
+        for path in files:
+            key = str(path)
+            try:
+                size = path.stat().st_size if path.is_file() else 0
+            except OSError:
+                size = 0
+
+            if key not in self._offsets:
+                # First time we see this file: baseline at current size so
+                # we only stream rows appended *after* server startup.
+                self._offsets[key] = size
+                continue
+
+            old = self._offsets[key]
+            if size < old:
+                # Truncated or rotated underneath us; reset and move on.
+                self._offsets[key] = size
+                continue
+            if size == old:
+                continue
+
+            try:
+                with path.open("rb") as f:
+                    f.seek(old)
+                    chunk = f.read()
+                self._offsets[key] = old + len(chunk)
+            except OSError:
+                continue
+
+            text = chunk.decode("utf-8", errors="replace")
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if not lines:
+                continue
+
+            if labels is None:
+                labels = load_labels(self.labels_path)
+
+            new_rows = []
+            for line in lines:
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                row = dict(obj)
+                row["source"] = path.name
+                _apply_label(row, labels)
+                new_rows.append(row)
+
+            if new_rows:
+                self._broadcast("rows", new_rows)
+
+
+def make_handler(log_paths, labels_path: Path, tailer: LogTailer):
     class Handler(BaseHTTPRequestHandler):
         server_version = "TierworkDashboard/1"
+        protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):
             # Keep stdout limited to the startup URL line; suppress the
@@ -232,6 +364,37 @@ def make_handler(log_paths, labels_path: Path):
             self.end_headers()
             self.wfile.write(body)
 
+        def _handle_sse(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+
+            q = tailer.add_client()
+            try:
+                hello = {
+                    "time": datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z")
+                }
+                self.wfile.write(
+                    f"event: hello\ndata: {json.dumps(hello)}\n\n".encode("utf-8")
+                )
+                self.wfile.flush()
+                while True:
+                    try:
+                        msg = q.get(timeout=SSE_PING_SECONDS)
+                        self.wfile.write(msg.encode("utf-8"))
+                    except queue.Empty:
+                        self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError, ConnectionAbortedError):
+                pass
+            finally:
+                tailer.remove_client(q)
+
         def do_GET(self):
             if self.path == "/" or self.path.startswith("/?"):
                 self._send_html(PAGE_HTML)
@@ -241,6 +404,11 @@ def make_handler(log_paths, labels_path: Path):
                     self._send_json(rows)
                 except Exception as e:
                     self._send_json({"error": str(e)}, status=500)
+            elif self.path == "/api/events":
+                try:
+                    self._handle_sse()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
             elif self.path == "/api/export.json":
                 try:
                     rows = merged_rows(log_paths, labels_path)
@@ -322,209 +490,223 @@ PAGE_HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>tierwork review dashboard</title>
+<title>tierwork mission control</title>
 <style>
   :root {
-    color-scheme: light;
-    --surface-1:      #fcfcfb;
-    --page:           #f9f9f7;
-    --text-primary:   #0b0b0b;
-    --text-secondary: #52514e;
-    --text-muted:     #898781;
-    --grid:           #e1e0d9;
-    --baseline:       #c3c2b7;
-    --border:         rgba(11,11,11,0.10);
-    --series-haiku:   #1baf7a; /* aqua */
-    --series-sonnet:  #2a78d6; /* blue */
-    --series-opus:    #4a3aa7; /* violet */
-    --series-other:   #898781;
-    --line-1:         #2a78d6; /* blue */
-    --line-2:         #eb6834; /* orange */
-    --line-3:         #1baf7a; /* aqua */
-    --line-4:         #eda100; /* yellow */
-    --line-5:         #e87ba4; /* magenta */
-    --line-6:         #008300; /* green */
-    --line-7:         #4a3aa7; /* violet */
-    --line-8:         #e34948; /* red */
-    --good:           #0ca30c;
-    --warning:        #fab219;
-    --critical:       #d03b3b;
+    --bg: #0B1220; --panel: #111B2E; --panel-2: #0E1728; --line: #24324A; --line-soft: #1A2539;
+    --text: #E6EDF7; --muted: #8B9BB4; --dim: #5B6B85;
+    --haiku: #7DD3A8; --sonnet: #60A5FA; --opus: #F59E0B; --unknown: #5B6B85;
+    --ok: #34D399; --bad: #FB7185; --warn: #FBBF24; --live: #FFFFFF;
+    --display: "Chakra Petch", "Segoe UI", system-ui, sans-serif;
+    --body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+    --mono: "IBM Plex Mono", "SF Mono", Menlo, Consolas, monospace;
+    --r: 6px; --gap: 16px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root:where(:not([data-theme="light"])) {
-      color-scheme: dark;
-      --surface-1:      #1a1a19;
-      --page:           #0d0d0d;
-      --text-primary:   #ffffff;
-      --text-secondary: #c3c2b7;
-      --text-muted:     #898781;
-      --grid:           #2c2c2a;
-      --baseline:       #383835;
-      --border:         rgba(255,255,255,0.10);
-      --series-haiku:   #199e70;
-      --series-sonnet:  #3987e5;
-      --series-opus:    #9085e9;
-      --series-other:   #898781;
-      --line-1:         #3987e5;
-      --line-2:         #d95926;
-      --line-3:         #199e70;
-      --line-4:         #c98500;
-      --line-5:         #d55181;
-      --line-6:         #008300;
-      --line-7:         #9085e9;
-      --line-8:         #e66767;
-      --good:           #0ca30c;
-      --warning:        #fab219;
-      --critical:       #e66767;
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #F3F6FB; --panel: #FFFFFF; --panel-2: #F7F9FD; --line: #CBD5E4; --line-soft: #E3E9F2;
+      --text: #0F1A2E; --muted: #526078; --dim: #8593AA;
+      --haiku: #1E9E63; --sonnet: #2563EB; --opus: #C2410C; --unknown: #8593AA;
+      --ok: #059669; --bad: #E11D48; --warn: #B45309; --live: #0F1A2E;
     }
   }
-  :root[data-theme="dark"] {
-    color-scheme: dark;
-    --surface-1:      #1a1a19;
-    --page:           #0d0d0d;
-    --text-primary:   #ffffff;
-    --text-secondary: #c3c2b7;
-    --text-muted:     #898781;
-    --grid:           #2c2c2a;
-    --baseline:       #383835;
-    --border:         rgba(255,255,255,0.10);
-    --series-haiku:   #199e70;
-    --series-sonnet:  #3987e5;
-    --series-opus:    #9085e9;
-    --series-other:   #898781;
-    --line-1:         #3987e5;
-    --line-2:         #d95926;
-    --line-3:         #199e70;
-    --line-4:         #c98500;
-    --line-5:         #d55181;
-    --line-6:         #008300;
-    --line-7:         #9085e9;
-    --line-8:         #e66767;
-    --good:           #0ca30c;
-    --warning:        #fab219;
-    --critical:       #e66767;
+  :root[data-theme="light"] {
+    --bg: #F3F6FB; --panel: #FFFFFF; --panel-2: #F7F9FD; --line: #CBD5E4; --line-soft: #E3E9F2;
+    --text: #0F1A2E; --muted: #526078; --dim: #8593AA;
+    --haiku: #1E9E63; --sonnet: #2563EB; --opus: #C2410C; --unknown: #8593AA;
+    --ok: #059669; --bad: #E11D48; --warn: #B45309; --live: #0F1A2E;
   }
-
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--page);
-    color: var(--text-primary);
-    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding: 24px;
-  }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  h2 { font-size: 14px; margin: 0 0 12px; color: var(--text-secondary); }
-  .sub { color: var(--text-secondary); margin: 0 0 20px; }
-  .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-  button {
-    font: inherit;
-    background: var(--surface-1);
-    color: var(--text-primary);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 12px;
-    cursor: pointer;
-  }
-  button:hover { border-color: var(--text-secondary); }
-  .toolbar a {
-    font: inherit;
-    color: inherit;
-    text-decoration: none;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 6px 12px;
-  }
-  .toolbar a:hover { border-color: var(--text-secondary); }
-  .tiles {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
-  }
-  .tile {
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px 16px;
-  }
-  .tile .value {
-    font-size: 24px;
-    font-variant-numeric: proportional-nums;
-    font-weight: 600;
-  }
-  .tile .label { color: var(--text-secondary); font-size: 12px; margin-top: 2px; }
-  .panel {
-    background: var(--surface-1);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 24px;
-    overflow-x: auto;
-  }
-  .empty {
-    color: var(--text-secondary);
-    padding: 40px 0;
-    text-align: center;
-  }
-  svg text { fill: var(--text-secondary); font-size: 11px; }
-  svg .axis-label { fill: var(--text-muted); }
-  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 12px; color: var(--text-secondary); }
-  .legend-item { display: flex; align-items: center; gap: 6px; }
-  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  th, td {
-    text-align: left;
-    padding: 6px 8px;
-    border-bottom: 1px solid var(--grid);
-    white-space: nowrap;
-  }
-  th { color: var(--text-secondary); font-weight: 600; position: sticky; top: 0; background: var(--surface-1); }
-  td.desc { white-space: normal; max-width: 320px; }
-  .label-controls { display: flex; gap: 4px; align-items: center; }
-  .label-controls button { padding: 3px 8px; font-size: 11px; }
-  .label-controls input[type=text] { font: inherit; font-size: 11px; width: 90px; padding: 3px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--page); color: var(--text-primary); }
-  .label-tag { font-size: 11px; padding: 2px 6px; border-radius: 10px; border: 1px solid var(--border); }
-  .label-tag.true_positive { color: var(--good); border-color: var(--good); }
-  .label-tag.false_positive { color: var(--critical); border-color: var(--critical); }
-  .label-tag.unclear { color: var(--warning); border-color: var(--warning); }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 var(--body); }
+  a { color: inherit; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 20px 24px 48px; display: grid; gap: var(--gap); }
+
+  /* top bar */
+  .top { display: flex; align-items: center; gap: 20px; padding: 10px 0 6px; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand h1 { font: 700 20px/1 var(--display); letter-spacing: .04em; margin: 0; text-transform: uppercase; }
+  .brand span { font-family: var(--mono); color: var(--muted); font-size: 12px; }
+  .status { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 0 rgba(255,255,255,.5); animation: pulse 1.6s ease-out infinite; }
+  .pulse.stale { background: var(--warn); animation: none; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.45);} 100% { box-shadow: 0 0 0 10px rgba(255,255,255,0);} }
+  .spacer { flex: 1; }
+  .btn { font: 500 12px var(--body); color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 6px 12px; cursor: pointer; }
+  .btn:hover { border-color: var(--muted); }
+  .btn:focus-visible, .row:focus-visible, .dot:focus-visible { outline: 2px solid var(--sonnet); outline-offset: 2px; }
+  .btn.primary { border-color: var(--opus); color: var(--opus); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  .seg button { font: 500 12px var(--body); color: var(--muted); background: var(--panel); border: 0; border-right: 1px solid var(--line); padding: 6px 12px; cursor: pointer; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { color: var(--text); background: var(--panel-2); }
+  .seg button:hover { color: var(--text); }
+  a.dl { font: 500 12px var(--body); color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 6px 12px; text-decoration: none; }
+  a.dl:hover { border-color: var(--muted); }
+
+  /* kpi strip */
+  .kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: var(--gap); }
+  .kpi { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r); padding: 12px 14px 10px; position: relative; overflow: hidden; }
+  .kpi .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .kpi .val { font: 600 28px/1.1 var(--display); margin-top: 4px; position: relative; z-index: 1; }
+  .kpi .sub { font-family: var(--mono); font-size: 11px; color: var(--muted); margin-top: 2px; white-space: nowrap; position: relative; z-index: 1; }
+  .kpi .sub.up { color: var(--ok); } .kpi .sub.down { color: var(--bad); }
+  .kpi.hero { border-color: var(--opus); }
+  .kpi.hero .val { color: var(--opus); }
+
+  /* panels */
+  .panel { background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r); }
+  .panel > header { display: flex; align-items: baseline; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .panel > header h2 { font: 600 14px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; margin: 0; }
+  .panel > header .meta { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .panel > header .spacer { flex: 1; }
+  .legend { display: flex; gap: 14px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .legend i { display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; }
+  .legend .haiku i { background: var(--haiku); border-radius: 50%; }
+  .legend .sonnet i { background: var(--sonnet); }
+  .legend .opus i { background: var(--opus); transform: rotate(45deg) scale(.85); }
+  .legend .unknown i { border: 1px solid var(--unknown); border-radius: 50%; background: transparent; }
+
+  /* hero grid: timeline + feed */
+  .hero { display: grid; grid-template-columns: 1fr 320px; gap: var(--gap); }
+  .lanes { padding: 8px 0 12px; overflow-x: auto; }
+  .lanes svg { width: 100%; height: 300px; display: block; }
+  .lane-lbl { font: 600 11px var(--display); letter-spacing: .08em; fill: var(--muted); text-transform: uppercase; }
+  .grid-l { stroke: var(--line-soft); stroke-width: 1; }
+  .axis-t { font: 10px var(--mono); fill: var(--dim); }
+  .dot { cursor: pointer; }
+  .dot.enter { animation: slidein .5s cubic-bezier(.2,.8,.2,1) both; }
+  @keyframes slidein { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .tip { position: absolute; pointer-events: none; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; font: 11px/1.5 var(--mono); color: var(--text); white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
+
+  .feed { display: flex; flex-direction: column; max-height: 360px; overflow-y: auto; }
+  .feed ol { list-style: none; margin: 0; padding: 6px 0; }
+  .feed li { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: start; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); }
+  .feed li.enter { animation: feedin .35s ease-out both; }
+  @keyframes feedin { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .feed .mark { width: 10px; height: 10px; margin-top: 4px; }
+  .feed .mark.haiku { background: var(--haiku); border-radius: 50%; }
+  .feed .mark.sonnet { background: var(--sonnet); }
+  .feed .mark.opus { background: var(--opus); transform: rotate(45deg) scale(.85); }
+  .feed .mark.unknown { border: 1px solid var(--unknown); border-radius: 50%; }
+  .feed .what { font-size: 12px; }
+  .feed .what b { font-weight: 600; }
+  .feed .what small { display: block; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .feed .tok { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: right; }
+  .v { display: inline-block; font-family: var(--mono); font-size: 10px; padding: 1px 6px; border-radius: 3px; border: 1px solid; margin-left: 6px; vertical-align: 1px; }
+  .v.confirmed { color: var(--ok); border-color: var(--ok); }
+  .v.refuted { color: var(--bad); border-color: var(--bad); }
+  .v.inconclusive { color: var(--muted); border-color: var(--muted); border-style: dashed; }
+
+  /* second row */
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+  .cost { padding: 14px 16px 16px; }
+  .bar { display: flex; height: 26px; border-radius: 4px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line-soft); }
+  .bar div { transition: width .6s cubic-bezier(.2,.8,.2,1); }
+  .bar .h { background: var(--haiku); } .bar .s { background: var(--sonnet); } .bar .o { background: var(--opus); } .bar .u { background: var(--unknown); }
+  .cost table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+  .cost td { padding: 5px 0; border-bottom: 1px solid var(--line-soft); }
+  .cost td:not(:first-child) { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .cost tfoot td { border: 0; color: var(--muted); font-size: 11px; padding-top: 8px; }
+  .funnel { padding: 14px 16px 16px; display: grid; gap: 8px; }
+  .step { display: grid; grid-template-columns: 150px 1fr 60px; align-items: center; gap: 10px; font-size: 12px; }
+  .step .track { height: 18px; background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 3px; overflow: hidden; }
+  .step .fill { height: 100%; transition: width .6s cubic-bezier(.2,.8,.2,1); background: var(--sonnet); }
+  .step.ok .fill { background: var(--ok); } .step.bad .fill { background: var(--bad); } .step.warn .fill { background: var(--warn); } .step.opus .fill { background: var(--opus); }
+  .step .n { text-align: right; font-family: var(--mono); }
+
+  /* table */
+  table.runs { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.runs th { text-align: left; font: 600 10px var(--display); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--line-soft); }
+  table.runs td { padding: 9px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+  table.runs td.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  table.runs tr.row:hover { background: var(--panel-2); }
+  .tier { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; }
+  .tier i { width: 9px; height: 9px; display: inline-block; }
+  .tier.haiku i { background: var(--haiku); border-radius: 50%; }
+  .tier.sonnet i { background: var(--sonnet); }
+  .tier.opus i { background: var(--opus); transform: rotate(45deg) scale(.85); }
+  .tier.unknown i { border: 1px solid var(--unknown); border-radius: 50%; background: transparent; }
+  .lbl-btns { display: inline-flex; gap: 4px; }
+  .lbl-btns button { font: 11px var(--mono); padding: 2px 7px; border-radius: 3px; border: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; }
+  .lbl-btns button.on.tp { color: var(--ok); border-color: var(--ok); }
+  .lbl-btns button.on.fp { color: var(--bad); border-color: var(--bad); }
+  .lbl-btns button:hover { color: var(--text); }
+  .foot { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: center; }
+  .empty-inline { color: var(--muted); padding: 48px 12px; text-align: center; font-size: 13px; }
+
+  @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } .hero, .row2 { grid-template-columns: 1fr; } }
+  @media (prefers-reduced-motion: reduce) { .pulse, .dot.enter, .feed li.enter { animation: none !important; } .bar div, .step .fill { transition: none !important; } }
 </style>
 </head>
 <body>
-  <h1>tierwork review dashboard</h1>
-  <p class="sub">Local, read-only view of <code>~/.tierwork/reviews.jsonl</code> (+ optional labels file). No data leaves this machine.</p>
-  <p id="sources" class="sub"></p>
-  <div class="toolbar">
-    <button id="reload-btn" type="button">Reload</button>
-    <label class="auto"><input id="auto-refresh" type="checkbox" checked> Auto-refresh (10 s) <span id="last-refresh"></span></label>
-    <a href="/api/export.json">Export JSON</a>
-    <a href="/api/export.csv">Export CSV</a>
-    <span id="status" style="color: var(--text-secondary);"></span>
+<div class="wrap">
+  <div class="top">
+    <div class="brand"><h1>Tierwork</h1><span>mission control</span></div>
+    <div class="status"><span class="pulse" id="pulse"></span><span id="live-lbl">LIVE · SSE</span><span>·</span><span id="last-ev">last event —</span></div>
+    <div class="spacer"></div>
+    <div class="seg" id="window-seg">
+      <button type="button" data-w="24h" class="on">24h</button>
+      <button type="button" data-w="7d">7d</button>
+      <button type="button" data-w="all">all</button>
+    </div>
+    <button class="btn" id="pause" type="button">Pause</button>
+    <a class="dl" href="/api/export.json">Export JSON</a>
+    <a class="dl" href="/api/export.csv">Export CSV</a>
   </div>
+  <div class="status" id="sources" style="padding: 2px 0 0;"></div>
 
-  <div id="tiles" class="tiles"></div>
+  <section class="kpis" id="kpis"></section>
 
-  <div class="panel">
-    <h2>Output tokens by agent type</h2>
-    <div id="bar-chart"></div>
-  </div>
+  <section class="hero">
+    <div class="panel">
+      <header><h2>Review swimlanes</h2><span class="meta">one mark per sub-agent · size = output tokens</span><span class="spacer"></span>
+        <div class="legend"><span class="haiku"><i></i>haiku</span><span class="sonnet"><i></i>sonnet</span><span class="opus"><i></i>opus</span><span class="unknown"><i></i>unknown</span></div></header>
+      <div class="lanes" style="position:relative"><svg id="lanes" viewBox="0 0 1040 300" role="img" aria-label="Timeline of sub-agent runs by lane"></svg><div class="tip" id="tip" hidden></div><div id="lanes-empty" hidden></div></div>
+    </div>
+    <div class="panel feed">
+      <header><h2>Live feed</h2><span class="spacer"></span><span class="meta" id="feed-n">0 events</span></header>
+      <ol id="feed"></ol>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>Output tokens per run over time</h2>
-    <div id="line-chart"></div>
-  </div>
+  <section class="row2">
+    <div class="panel"><header><h2>Output tokens by tier</h2><span class="meta">est. cost at list price</span></header>
+      <div class="cost"><div class="bar" id="bar"><div class="h"></div><div class="s"></div><div class="o"></div><div class="u"></div></div>
+        <table><thead></thead><tbody id="cost-rows"></tbody><tfoot><tr><td colspan="4">haiku $5 · sonnet $10 · opus $25 per 1M output tokens (list price, not spend). Subscription plans meter differently.</td></tr></tfoot></table></div>
+    </div>
+    <div class="panel"><header><h2>Verdict funnel</h2><span class="meta">hunters → validators → primary → labels</span></header>
+      <div class="funnel" id="funnel"></div>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>Runs</h2>
-    <div id="table-wrap"></div>
-  </div>
+  <section class="panel">
+    <header><h2>Runs</h2><span class="meta">newest first</span></header>
+    <div style="overflow-x:auto"><table class="runs"><thead><tr><th>time</th><th>agent</th><th>tier</th><th>msgs</th><th>tools</th><th>out tok</th><th>verdict</th><th>conf</th><th>primary?</th><th>task</th><th>label</th></tr></thead><tbody id="runs"></tbody></table></div>
+  </section>
+  <div class="foot">Local, read-only view of tierwork's SubagentStop log (+ optional labels file). No data leaves this machine.</div>
+</div>
 
 <script>
 (function () {
   "use strict";
+  var reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var LANES = ["tierwork:gate", "tierwork:bug-hunter", "tierwork:bug-validator", "tierwork:compliance-reviewer"];
+  var LANE_SHORT = { "tierwork:gate": "gate", "tierwork:bug-hunter": "bug-hunter", "tierwork:bug-validator": "bug-validator", "tierwork:compliance-reviewer": "compliance" };
+  var PRICE = { haiku: 5, sonnet: 10, opus: 25 };
 
-  var state = { rows: [] };
+  // state.byKey: Map key -> row, used for de-dup/upsert of both the initial
+  // /api/rows fetch and incoming SSE `rows` events.
+  var state = { byKey: new Map(), window: "24h", paused: false, bufferedKeys: [] };
 
+  function rowKey(r) { return (r.session_id || "") + " " + (r.agent_id || ""); }
+  function num(v) {
+    if (typeof v === "number" && !isNaN(v)) return v;
+    if (typeof v === "string") { var n = parseFloat(v); if (!isNaN(n)) return n; }
+    return 0;
+  }
+  function fmt(n) { return Math.round(n).toLocaleString("en-US"); }
+  function $(s) { return document.querySelector(s); }
   function esc(s) {
     if (s === null || s === undefined) return "";
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -532,449 +714,417 @@ PAGE_HTML = r"""<!doctype html>
     });
   }
 
-  function num(v) {
-    if (typeof v === "number" && !isNaN(v)) return v;
-    if (typeof v === "string") {
-      var n = parseFloat(v);
-      if (!isNaN(n)) return n;
-    }
-    return 0;
-  }
-
-  function basename(p) {
-    if (!p) return "";
-    var parts = String(p).split("/").filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : String(p);
-  }
-
-  // Bucket the first entry of a row's `models` list into haiku/sonnet/opus/other,
-  // matching the naming already used elsewhere in bench/ (model id strings
-  // contain "haiku"/"sonnet"/"opus").
-  function modelBucket(row) {
+  // Tier: prefer spawn_model, then models[0], substring match on
+  // haiku/sonnet/opus (case-insensitive); else "unknown".
+  function tierOf(row) {
+    var spawn = String(row.spawn_model || "").toLowerCase();
+    if (spawn.indexOf("haiku") !== -1) return "haiku";
+    if (spawn.indexOf("sonnet") !== -1) return "sonnet";
+    if (spawn.indexOf("opus") !== -1) return "opus";
     var models = Array.isArray(row.models) ? row.models : [];
     var first = models.length ? String(models[0]).toLowerCase() : "";
     if (first.indexOf("haiku") !== -1) return "haiku";
     if (first.indexOf("sonnet") !== -1) return "sonnet";
     if (first.indexOf("opus") !== -1) return "opus";
+    return "unknown";
+  }
+
+  function laneOf(row) {
+    var t = row.agent_type;
+    if (LANES.indexOf(t) !== -1) return t;
+    if (t && String(t).indexOf("tierwork:") === 0) return "other";
     return "other";
   }
 
-  var bucketColorVar = {
-    haiku: "--series-haiku",
-    sonnet: "--series-sonnet",
-    opus: "--series-opus",
-    other: "--series-other"
-  };
-
-  function cssVar(name) {
-    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  function isPrimary(row) {
+    return String(row.needs_primary_review || "").trim().toLowerCase() === "yes";
   }
 
-  // Fixed line-chart palette slots, assigned per distinct agent_type in
-  // first-seen order (categorical hues in fixed order, per dataviz skill).
-  var lineSlots = ["--line-1", "--line-2", "--line-3", "--line-4", "--line-5", "--line-6", "--line-7", "--line-8"];
-
-  function computeStats(rows) {
-    var total = rows.length;
-    var validators = rows.filter(function (r) { return r.agent_type === "tierwork:bug-validator"; });
-    var confirmed = validators.filter(function (r) { return r.verdict === "confirmed"; }).length;
-    var needsReview = validators.filter(function (r) {
-      return String(r.needs_primary_review || "").trim().toLowerCase() === "yes";
-    }).length;
-    var totalOutputTokens = rows.reduce(function (sum, r) { return sum + num(r.output_tokens); }, 0);
-    var labeled = validators.filter(function (r) { return !!r.label; }).length;
-
-    return {
-      total: total,
-      validatorCount: validators.length,
-      confirmedShare: validators.length ? confirmed / validators.length : null,
-      needsReviewShare: validators.length ? needsReview / validators.length : null,
-      totalOutputTokens: totalOutputTokens,
-      labeledShare: validators.length ? labeled / validators.length : null
-    };
+  function tsMillis(row) {
+    var t = row.ts ? Date.parse(row.ts) : NaN;
+    return isNaN(t) ? null : t;
   }
 
-  function pct(x) {
-    if (x === null || x === undefined) return "n/a";
-    return (x * 100).toFixed(0) + "%";
+  function upsertRows(list) {
+    var added = [];
+    list.forEach(function (r) {
+      var k = rowKey(r);
+      var already = state.byKey.has(k);
+      state.byKey.set(k, r);
+      if (!already) added.push(k);
+    });
+    return added;
   }
 
-  function renderTiles(stats) {
-    var tiles = [
-      { label: "Total sub-agent runs", value: stats.total },
-      { label: "Validator runs", value: stats.validatorCount },
-      { label: "Confirmed share (validators)", value: pct(stats.confirmedShare) },
-      { label: "needs_primary_review share", value: pct(stats.needsReviewShare) },
-      { label: "Total output tokens", value: stats.totalOutputTokens.toLocaleString() },
-      { label: "Labeled share (validators)", value: pct(stats.labeledShare) }
+  function allRows() { return Array.from(state.byKey.values()); }
+
+  function windowRows() {
+    var rows = allRows();
+    if (state.window === "all") return rows;
+    var spanMs = state.window === "24h" ? 24 * 3600e3 : 7 * 24 * 3600e3;
+    var cutoff = Date.now() - spanMs;
+    return rows.filter(function (r) { var t = tsMillis(r); return t !== null && t >= cutoff; });
+  }
+
+  function tickIntervalMs(minT, maxT) {
+    if (state.window === "24h") return 4 * 3600e3;
+    if (state.window === "7d") return 24 * 3600e3;
+    var span = Math.max(maxT - minT, 1);
+    var raw = span / 6;
+    // round to a friendly unit: hour/day/week granularity
+    var units = [3600e3, 6 * 3600e3, 12 * 3600e3, 24 * 3600e3, 7 * 24 * 3600e3];
+    for (var i = 0; i < units.length; i++) if (raw <= units[i]) return units[i];
+    return units[units.length - 1];
+  }
+
+  // ---- KPIs ----
+  function renderKPIs() {
+    var rows = windowRows();
+    var vals = rows.filter(function (r) { return r.agent_type === "tierwork:bug-validator"; });
+    var conf = vals.filter(function (r) { return r.verdict === "confirmed"; }).length;
+    var prim = vals.filter(isPrimary).length;
+    var tok = rows.reduce(function (a, r) { return a + num(r.output_tokens); }, 0);
+    var cost = rows.reduce(function (a, r) { var t = tierOf(r); return a + (PRICE[t] ? num(r.output_tokens) / 1e6 * PRICE[t] : 0); }, 0);
+    var labeled = vals.filter(function (r) { return !!r.label; }).length;
+    var opusTok = rows.filter(function (r) { return tierOf(r) === "opus"; }).reduce(function (a, r) { return a + num(r.output_tokens); }, 0);
+
+    var k = [
+      ["Sub-agent runs", rows.length ? fmt(rows.length) : "—"],
+      ["Validators confirmed", vals.length ? Math.round(conf / vals.length * 100) + "%" : "—", vals.length ? conf + " of " + vals.length : ""],
+      ["Needs primary review", vals.length ? Math.round(prim / vals.length * 100) + "%" : "—", vals.length ? prim + " findings" : ""],
+      ["Output tokens", rows.length ? fmt(tok) : "—", "all tiers"],
+      ["Est. cost", rows.length ? "$" + cost.toFixed(2) : "—", tok ? "opus share " + Math.round(opusTok / tok * 100) + "%" : ""],
+      ["Labeled", vals.length ? Math.round(labeled / vals.length * 100) + "%" : "—", vals.length ? labeled + " of " + vals.length + " validators" : ""]
     ];
-    var el = document.getElementById("tiles");
-    el.innerHTML = tiles.map(function (t) {
-      return '<div class="tile"><div class="value">' + esc(t.value) + '</div><div class="label">' + esc(t.label) + "</div></div>";
+    $("#kpis").innerHTML = k.map(function (x, i) {
+      return '<div class="kpi' + (i === 4 ? " hero" : "") + '"><div class="lbl">' + esc(x[0]) + '</div><div class="val num">' + esc(x[1]) + '</div><div class="sub">' + esc(x[2] || "") + "</div></div>";
     }).join("");
   }
 
-  function svgEl(tag, attrs) {
-    var e = document.createElementNS("http://www.w3.org/2000/svg", tag);
-    for (var k in attrs) e.setAttribute(k, attrs[k]);
-    return e;
-  }
+  // ---- Swimlanes ----
+  var svg = $("#lanes"), NS = "http://www.w3.org/2000/svg";
+  var tip = $("#tip");
+  function el(n, a) { var e = document.createElementNS(NS, n); for (var k in a) e.setAttribute(k, a[k]); return e; }
 
-  function renderBarChart(rows) {
-    var host = document.getElementById("bar-chart");
-    host.innerHTML = "";
+  function renderLanes(newKeys) {
+    var rows = windowRows().filter(function (r) { return tsMillis(r) !== null; });
+    var lanesEmpty = $("#lanes-empty");
+    svg.innerHTML = "";
     if (!rows.length) {
-      host.innerHTML = '<div class="empty">No data yet.</div>';
+      svg.style.display = "none";
+      lanesEmpty.hidden = false;
+      lanesEmpty.className = "empty-inline";
+      lanesEmpty.textContent = "No runs yet. Records appear here as soon as a tierwork:* sub-agent finishes.";
       return;
     }
+    svg.style.display = "";
+    lanesEmpty.hidden = true;
 
-    var byType = {};
-    rows.forEach(function (r) {
-      var t = r.agent_type || "(unknown)";
-      if (!byType[t]) byType[t] = { total: 0, bucket: modelBucket(r) };
-      byType[t].total += num(r.output_tokens);
+    var lanes = LANES.slice();
+    var hasOther = rows.some(function (r) { return laneOf(r) === "other"; });
+    if (hasOther) lanes.push("other");
+    var laneShort = lanes.map(function (l) { return l === "other" ? "other" : LANE_SHORT[l]; });
+
+    var L = 120, R = 1030, T = 18, LH = 300 / lanes.length, W = R - L;
+    var minT = Math.min.apply(null, rows.map(function (r) { return tsMillis(r); }));
+    var maxT = Math.max.apply(null, rows.map(function (r) { return tsMillis(r); }));
+    var span = Math.max(maxT - minT, 1);
+    svg.setAttribute("viewBox", "0 0 1040 " + (T + lanes.length * LH + 24));
+    svg.setAttribute("height", (T + lanes.length * LH + 24));
+
+    lanes.forEach(function (ln, i) {
+      var y = T + i * LH + LH / 2;
+      svg.appendChild(el("line", { x1: L, x2: R, y1: y, y2: y, class: "grid-l" }));
+      var t = el("text", { x: 8, y: y + 4, class: "lane-lbl" });
+      t.textContent = laneShort[i];
+      svg.appendChild(t);
     });
-    var types = Object.keys(byType).sort();
-    if (!types.length) {
-      host.innerHTML = '<div class="empty">No data yet.</div>';
-      return;
-    }
 
-    var width = Math.max(480, types.length * 90 + 80);
-    var height = 240;
-    var marginLeft = 60, marginBottom = 60, marginTop = 34, marginRight = 16;
-    var plotW = width - marginLeft - marginRight;
-    var plotH = height - marginTop - marginBottom;
-    var maxVal = Math.max.apply(null, types.map(function (t) { return byType[t].total; })) || 1;
-
-    var svg = svgEl("svg", {
-      viewBox: "0 0 " + width + " " + height,
-      width: "100%",
-      height: height,
-      role: "img",
-      "aria-label": "Bar chart of total output tokens per agent type"
-    });
-    var title = svgEl("title", {});
-    title.textContent = "Output tokens summed per agent type, colored by dominant model tier";
-    svg.appendChild(title);
-
-    // y axis gridlines + ticks
-    var ticks = 4;
-    for (var i = 0; i <= ticks; i++) {
-      var yv = maxVal * i / ticks;
-      var y = marginTop + plotH - (plotH * i / ticks);
-      var grid = svgEl("line", { x1: marginLeft, x2: width - marginRight, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1 });
-      svg.appendChild(grid);
-      var label = svgEl("text", { x: marginLeft - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = Math.round(yv).toLocaleString();
+    var tick = tickIntervalMs(minT, maxT);
+    var axisY = T + lanes.length * LH + 6;
+    for (var tt = minT; tt <= maxT + 1; tt += tick) {
+      var x = L + W * (tt - minT) / span;
+      var d = new Date(tt);
+      var label = el("text", { x: x, y: axisY, class: "axis-t", "text-anchor": "middle" });
+      label.textContent = state.window === "24h" ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
       svg.appendChild(label);
     }
-    var axisLabel = svgEl("text", { x: marginLeft - 8, y: 16, "text-anchor": "end", class: "axis-label" });
-    axisLabel.textContent = "output tokens";
-    svg.appendChild(axisLabel);
 
-    var barW = Math.min(60, plotW / types.length - 20);
-    types.forEach(function (t, idx) {
-      var slotW = plotW / types.length;
-      var cx = marginLeft + slotW * idx + slotW / 2;
-      var val = byType[t].total;
-      var barH = maxVal ? (val / maxVal) * plotH : 0;
-      var x = cx - barW / 2;
-      var y = marginTop + plotH - barH;
-      var colorVar = bucketColorVar[byType[t].bucket] || bucketColorVar.other;
-      var color = cssVar(colorVar);
-
-      var rect = svgEl("rect", {
-        x: x, y: y, width: barW, height: Math.max(barH, 1),
-        fill: color, rx: 4, ry: 4
-      });
-      var rtitle = svgEl("title", {});
-      rtitle.textContent = t + ": " + val.toLocaleString() + " output tokens (" + byType[t].bucket + ")";
-      rect.appendChild(rtitle);
-      svg.appendChild(rect);
-
-      var xlabel = svgEl("text", { x: cx, y: height - marginBottom + 18, "text-anchor": "middle" });
-      xlabel.textContent = t.length > 20 ? t.slice(0, 18) + "…" : t;
-      svg.appendChild(xlabel);
-    });
-
-    var baseline = svgEl("line", {
-      x1: marginLeft, x2: width - marginRight, y1: marginTop + plotH, y2: marginTop + plotH,
-      stroke: "var(--baseline)", "stroke-width": 1
-    });
-    svg.appendChild(baseline);
-
-    host.appendChild(svg);
-
-    var legend = document.createElement("div");
-    legend.className = "legend";
-    ["haiku", "sonnet", "opus", "other"].forEach(function (b) {
-      var used = types.some(function (t) { return byType[t].bucket === b; });
-      if (!used) return;
-      var item = document.createElement("span");
-      item.className = "legend-item";
-      item.innerHTML = '<span class="swatch" style="background:' + cssVar(bucketColorVar[b]) + '"></span>' + esc(b);
-      legend.appendChild(item);
-    });
-    host.appendChild(legend);
-  }
-
-  function renderLineChart(rows) {
-    var host = document.getElementById("line-chart");
-    host.innerHTML = "";
-    var pts = rows
-      .map(function (r) {
-        var t = r.ts ? Date.parse(r.ts) : NaN;
-        return { t: t, y: num(r.output_tokens), type: r.agent_type || "(unknown)" };
-      })
-      .filter(function (p) { return !isNaN(p.t); });
-
-    if (!pts.length) {
-      host.innerHTML = '<div class="empty">No data yet.</div>';
-      return;
-    }
-
-    var types = [];
-    pts.forEach(function (p) { if (types.indexOf(p.type) === -1) types.push(p.type); });
-    types.sort();
-    var colorOf = {};
-    types.forEach(function (t, i) { colorOf[t] = cssVar(lineSlots[i % lineSlots.length]); });
-
-    var width = 720, height = 260;
-    var marginLeft = 70, marginBottom = 40, marginTop = 34, marginRight = 16;
-    var plotW = width - marginLeft - marginRight;
-    var plotH = height - marginTop - marginBottom;
-
-    var minT = Math.min.apply(null, pts.map(function (p) { return p.t; }));
-    var maxT = Math.max.apply(null, pts.map(function (p) { return p.t; }));
-    var maxY = Math.max.apply(null, pts.map(function (p) { return p.y; })) || 1;
-    var spanT = maxT - minT || 1;
-
-    function xOf(t) { return marginLeft + ((t - minT) / spanT) * plotW; }
-    function yOf(y) { return marginTop + plotH - (y / maxY) * plotH; }
-
-    var svg = svgEl("svg", {
-      viewBox: "0 0 " + width + " " + height,
-      width: "100%",
-      height: height,
-      role: "img",
-      "aria-label": "Line and dot chart of output tokens per run over time, colored by agent type"
-    });
-    var title = svgEl("title", {});
-    title.textContent = "Output tokens per run over time, by agent type";
-    svg.appendChild(title);
-
-    var ticks = 4;
-    for (var i = 0; i <= ticks; i++) {
-      var yv = maxY * i / ticks;
-      var y = yOf(yv);
-      var grid = svgEl("line", { x1: marginLeft, x2: width - marginRight, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1 });
-      svg.appendChild(grid);
-      var label = svgEl("text", { x: marginLeft - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = Math.round(yv).toLocaleString();
-      svg.appendChild(label);
-    }
-    var axisLabel = svgEl("text", { x: marginLeft - 8, y: 16, "text-anchor": "end", class: "axis-label" });
-    axisLabel.textContent = "output tokens";
-    svg.appendChild(axisLabel);
-
-    // x axis ticks: start / end timestamps
-    [minT, maxT].forEach(function (t) {
-      var x = xOf(t);
-      var label = svgEl("text", { x: x, y: height - marginBottom + 16, "text-anchor": t === minT ? "start" : "end" });
-      var d = new Date(t);
-      label.textContent = isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
-      svg.appendChild(label);
-    });
-    var xAxisLabel = svgEl("text", { x: width - marginRight, y: height - 4, "text-anchor": "end", class: "axis-label" });
-    xAxisLabel.textContent = "time";
-    svg.appendChild(xAxisLabel);
-
-    var baseline = svgEl("line", {
-      x1: marginLeft, x2: width - marginRight, y1: marginTop + plotH, y2: marginTop + plotH,
-      stroke: "var(--baseline)", "stroke-width": 1
-    });
-    svg.appendChild(baseline);
-
-    types.forEach(function (type) {
-      var series = pts.filter(function (p) { return p.type === type; }).sort(function (a, b) { return a.t - b.t; });
-      var color = colorOf[type];
-      if (series.length > 1) {
-        var d = series.map(function (p, i) {
-          return (i === 0 ? "M" : "L") + xOf(p.t).toFixed(1) + "," + yOf(p.y).toFixed(1);
-        }).join(" ");
-        var path = svgEl("path", { d: d, fill: "none", stroke: color, "stroke-width": 2 });
-        svg.appendChild(path);
+    var newKeySet = new Set(newKeys || []);
+    var byTs = rows.slice().sort(function (a, b) { return tsMillis(a) - tsMillis(b); });
+    byTs.forEach(function (r) {
+      var lane = laneOf(r);
+      var li = lanes.indexOf(lane);
+      if (li === -1) return;
+      var x = L + W * (tsMillis(r) - minT) / span;
+      var y = T + li * LH + LH / 2;
+      var tier = tierOf(r);
+      var rad = 4 + Math.sqrt(Math.max(num(r.output_tokens), 0)) / 9;
+      var col = "var(--" + tier + ")";
+      var s;
+      if (tier === "unknown") {
+        s = el("circle", { cx: x, cy: y, r: rad, fill: "none", stroke: col, "stroke-width": 1.5 });
+      } else if (tier === "haiku") {
+        s = el("circle", { cx: x, cy: y, r: rad, fill: col });
+      } else if (tier === "sonnet") {
+        s = el("rect", { x: x - rad, y: y - rad, width: rad * 2, height: rad * 2, fill: col });
+      } else {
+        s = el("polygon", { points: x + "," + (y - rad) + " " + (x + rad) + "," + y + " " + x + "," + (y + rad) + " " + (x - rad) + "," + y, fill: col });
       }
-      series.forEach(function (p) {
-        var c = svgEl("circle", { cx: xOf(p.t), cy: yOf(p.y), r: 4, fill: color });
-        var ctitle = svgEl("title", {});
-        var d2 = new Date(p.t);
-        ctitle.textContent = type + " @ " + (isNaN(d2.getTime()) ? p.t : d2.toISOString()) + ": " + p.y.toLocaleString() + " output tokens";
-        c.appendChild(ctitle);
-        svg.appendChild(c);
-      });
+      if (r.verdict === "refuted") { s.setAttribute("stroke", "var(--bad)"); s.setAttribute("stroke-width", "2"); s.setAttribute("fill-opacity", ".35"); }
+      if (r.verdict === "inconclusive") { s.setAttribute("stroke-dasharray", "2 2"); s.setAttribute("stroke", col); s.setAttribute("fill-opacity", ".25"); }
+      s.setAttribute("class", "dot" + (newKeySet.has(rowKey(r)) && !reduce ? " enter" : ""));
+      s.setAttribute("tabindex", "0");
+      s.setAttribute("aria-label", (r.agent_type || "") + " " + tier + " " + fmt(num(r.output_tokens)) + " output tokens " + (r.verdict || ""));
+      var show = function (ev) {
+        tip.hidden = false;
+        tip.innerHTML = "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + "<br>out " + fmt(num(r.output_tokens)) + " · msgs " + esc(r.msgs) + " · tools " + esc(r.tool_calls) + (r.verdict ? "<br>verdict " + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " · conf " + esc(r.confidence) : "") : "");
+        var b = svg.getBoundingClientRect();
+        var pt = ev.clientX ? { x: ev.clientX - b.left, y: ev.clientY - b.top } : { x: x, y: y };
+        tip.style.left = Math.min(pt.x + 12, b.width - 240) + "px";
+        tip.style.top = (pt.y + 12) + "px";
+      };
+      s.addEventListener("mousemove", show);
+      s.addEventListener("focus", show);
+      s.addEventListener("mouseleave", function () { tip.hidden = true; });
+      s.addEventListener("blur", function () { tip.hidden = true; });
+      svg.appendChild(s);
     });
-
-    host.appendChild(svg);
-
-    var legend = document.createElement("div");
-    legend.className = "legend";
-    types.forEach(function (t) {
-      var item = document.createElement("span");
-      item.className = "legend-item";
-      item.innerHTML = '<span class="swatch" style="background:' + colorOf[t] + '"></span>' + esc(t);
-      legend.appendChild(item);
-    });
-    host.appendChild(legend);
   }
 
-  function fmtModels(row) {
-    var spawn = row.spawn_model || "?";
-    var models = Array.isArray(row.models) ? row.models.join(",") : "?";
-    return spawn + "→" + models;
+  // ---- Feed ----
+  function renderFeed(newKeys) {
+    var feed = $("#feed");
+    var rows = windowRows().filter(function (r) { return tsMillis(r) !== null; });
+    var newKeySet = new Set(newKeys || []);
+    var recent = rows.slice().sort(function (a, b) { return tsMillis(b) - tsMillis(a); }).slice(0, 14);
+    feed.innerHTML = recent.map(function (r) {
+      var tier = tierOf(r);
+      return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what"><b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " " + esc(r.confidence) : "") + "</span>" : "") + "<small>" + esc(r.description || "") + " · " + new Date(tsMillis(r)).toLocaleTimeString() + "</small></span><span class=\"tok num\">" + fmt(num(r.output_tokens)) + "<br>tok</span></li>";
+    }).join("");
+    $("#feed-n").textContent = rows.length + " events";
+    var lastT = rows.length ? Math.max.apply(null, rows.map(function (r) { return tsMillis(r); })) : null;
+    $("#last-ev").textContent = "last event " + (lastT ? new Date(lastT).toLocaleTimeString() : "—");
   }
 
-  function labelButtons(row) {
-    if (row.agent_type !== "tierwork:bug-validator") return "";
-    var current = row.label
-      ? '<span class="label-tag ' + esc(row.label) + '">' + esc(row.label) + (row.label_note ? ": " + esc(row.label_note) : "") + '</span>'
-      : "";
-    var sid = esc(row.session_id);
-    var aid = esc(row.agent_id);
-    return (
-      '<div class="label-controls" data-session="' + sid + '" data-agent="' + aid + '">' +
-      '<button type="button" class="label-btn" data-label="true_positive">TP</button>' +
-      '<button type="button" class="label-btn" data-label="false_positive">FP</button>' +
-      '<button type="button" class="label-btn" data-label="unclear">?</button>' +
-      '<input type="text" class="note-input" placeholder="note">' +
-      current +
-      "</div>"
-    );
+  // ---- Cost bar ----
+  function renderCost() {
+    var rows = windowRows();
+    var t = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 }, n = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 };
+    rows.forEach(function (r) { var tier = tierOf(r); t[tier] += num(r.output_tokens); n[tier]++; });
+    var tot = t.haiku + t.sonnet + t.opus + t.unknown || 1;
+    var bar = $("#bar");
+    bar.children[0].style.width = (t.haiku / tot * 100) + "%";
+    bar.children[1].style.width = (t.sonnet / tot * 100) + "%";
+    bar.children[2].style.width = (t.opus / tot * 100) + "%";
+    bar.children[3].style.width = (t.unknown / tot * 100) + "%";
+    $("#cost-rows").innerHTML = ["haiku", "sonnet", "opus", "unknown"].map(function (k) {
+      var price = PRICE[k];
+      var costStr = price ? "$" + (t[k] / 1e6 * price).toFixed(3) : "—";
+      return '<tr><td><span class="tier ' + k + '"><i></i>' + k + "</span></td><td>" + n[k] + " runs</td><td>" + fmt(t[k]) + " tok</td><td>" + costStr + "</td></tr>";
+    }).join("");
   }
 
-  function renderTable(rows) {
-    var wrap = document.getElementById("table-wrap");
-    if (!rows.length) {
-      wrap.innerHTML = '<div class="empty">No data yet. Run a tierwork sub-agent, or check --log points at the right file.</div>';
-      return;
-    }
-    var sorted = rows.slice().sort(function (a, b) {
-      var ta = a.ts ? Date.parse(a.ts) : 0;
-      var tb = b.ts ? Date.parse(b.ts) : 0;
-      return tb - ta;
-    });
+  // ---- Verdict funnel ----
+  function renderFunnel() {
+    var rows = windowRows();
+    var hunters = rows.filter(function (r) { return r.agent_type === "tierwork:bug-hunter"; }).length;
+    var vals = rows.filter(function (r) { return r.agent_type === "tierwork:bug-validator"; });
+    var c = vals.filter(function (r) { return r.verdict === "confirmed"; }).length;
+    var rf = vals.filter(function (r) { return r.verdict === "refuted"; }).length;
+    var inc = vals.filter(function (r) { return r.verdict === "inconclusive"; }).length;
+    var prim = vals.filter(isPrimary).length;
+    var tp = vals.filter(function (r) { return r.label === "true_positive"; }).length;
+    var fp = vals.filter(function (r) { return r.label === "false_positive"; }).length;
+    var max = Math.max(vals.length, 1);
+    var steps = [
+      ["Findings validated", vals.length, "", vals.length],
+      ["Confirmed", c, "ok", c],
+      ["Refuted", rf, "bad", rf],
+      ["Inconclusive", inc, "warn", inc],
+      ["Needs primary review", prim, "opus", prim],
+      ["Labeled true positive", tp, "ok", tp],
+      ["Labeled false positive", fp, "bad", fp]
+    ];
+    $("#funnel").innerHTML =
+      '<div class="step"><span>Hunter runs</span><div class="track"><div class="fill" style="width:100%;background:var(--opus)"></div></div><span class="n">' + hunters + "</span></div>" +
+      steps.map(function (s) {
+        return '<div class="step ' + s[2] + '"><span>' + esc(s[0]) + '</span><div class="track"><div class="fill" style="width:' + (s[3] / max * 100) + '%"></div></div><span class="n">' + s[1] + "</span></div>";
+      }).join("");
+  }
 
-    var cols = ["ts", "agent_type", "models", "msgs", "tool_calls", "output_tokens", "verdict", "confidence", "needs_primary_review", "proceed", "description", "cwd", "label"];
-    var head = cols.map(function (c) { return "<th>" + esc(c) + "</th>"; }).join("");
+  // ---- Runs table ----
+  function labelButtonsHtml(r) {
+    if (r.agent_type !== "tierwork:bug-validator") return "";
+    return '<span class="lbl-btns" data-session="' + esc(r.session_id) + '" data-agent="' + esc(r.agent_id) + '">' +
+      '<button class="tp' + (r.label === "true_positive" ? " on" : "") + '" data-l="true_positive" aria-label="label true positive">TP</button>' +
+      '<button class="fp' + (r.label === "false_positive" ? " on" : "") + '" data-l="false_positive" aria-label="label false positive">FP</button>' +
+      "</span>";
+  }
 
-    var body = sorted.map(function (r) {
-      return (
-        "<tr>" +
-        "<td>" + esc(r.ts) + "</td>" +
-        "<td>" + esc(r.agent_type) + "</td>" +
-        "<td>" + esc(fmtModels(r)) + "</td>" +
-        "<td>" + esc(r.msgs) + "</td>" +
-        "<td>" + esc(r.tool_calls) + "</td>" +
-        "<td>" + esc(num(r.output_tokens).toLocaleString()) + "</td>" +
-        "<td>" + esc(r.verdict) + "</td>" +
-        "<td>" + esc(r.confidence) + "</td>" +
-        "<td>" + esc(r.needs_primary_review) + "</td>" +
-        "<td>" + esc(r.proceed) + "</td>" +
-        '<td class="desc">' + esc(r.description) + "</td>" +
-        "<td>" + esc(basename(r.cwd)) + "</td>" +
-        "<td>" + labelButtons(r) + "</td>" +
-        "</tr>"
-      );
+  function renderRuns() {
+    var rows = windowRows().filter(function (r) { return tsMillis(r) !== null; });
+    var tb = $("#runs");
+    var sorted = rows.slice().sort(function (a, b) { return tsMillis(b) - tsMillis(a); }).slice(0, 200);
+    tb.innerHTML = sorted.map(function (r) {
+      var tier = tierOf(r);
+      return "<tr class=\"row\">" +
+        '<td class="mono">' + new Date(tsMillis(r)).toLocaleTimeString() + "</td>" +
+        "<td>" + esc((r.agent_type || "").replace("tierwork:", "")) + "</td>" +
+        '<td><span class="tier ' + tier + '"><i></i>' + tier + "</span></td>" +
+        '<td class="mono">' + esc(r.msgs) + "</td>" +
+        '<td class="mono">' + esc(r.tool_calls) + "</td>" +
+        '<td class="mono">' + fmt(num(r.output_tokens)) + "</td>" +
+        "<td>" + (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—") + "</td>" +
+        '<td class="mono">' + (r.confidence !== undefined && r.confidence !== null && r.confidence !== "" ? esc(r.confidence) : "—") + "</td>" +
+        "<td>" + (r.verdict ? (isPrimary(r) ? '<span style="color:var(--warn)">yes</span>' : "no") : "—") + "</td>" +
+        "<td>" + esc(r.description || "") + "</td>" +
+        "<td>" + labelButtonsHtml(r) + "</td>" +
+        "</tr>";
     }).join("");
 
-    wrap.innerHTML = "<table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table>";
-
-    wrap.querySelectorAll(".label-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var controls = btn.closest(".label-controls");
-        var sessionId = controls.getAttribute("data-session");
-        var agentId = controls.getAttribute("data-agent");
-        var label = btn.getAttribute("data-label");
-        var noteInput = controls.querySelector(".note-input");
-        var note = noteInput ? noteInput.value : "";
-        setStatus("Saving label…");
+    tb.querySelectorAll(".lbl-btns button").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var wrap = btn.closest(".lbl-btns");
+        var sessionId = wrap.getAttribute("data-session");
+        var agentId = wrap.getAttribute("data-agent");
+        var label = btn.getAttribute("data-l");
         fetch("/api/label", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, agent_id: agentId, label: label, note: note })
+          body: JSON.stringify({ session_id: sessionId, agent_id: agentId, label: label, note: "" })
         })
-          .then(function (resp) {
-            if (!resp.ok) throw new Error("HTTP " + resp.status);
-            return resp.json();
+          .then(function (resp) { if (!resp.ok) throw new Error("HTTP " + resp.status); return resp.json(); })
+          .then(function (rec) {
+            var k = (sessionId || "") + " " + (agentId || "");
+            var row = state.byKey.get(k);
+            if (row) { row.label = rec.label; row.label_note = rec.note; row.label_ts = rec.label_ts; }
+            renderAll();
           })
-          .then(function () {
-            setStatus("Label saved.");
-            return loadAndRender();
-          })
-          .catch(function (err) {
-            setStatus("Label save failed: " + err.message);
-          });
+          .catch(function () { /* leave UI as-is; user can retry */ });
       });
     });
-  }
-
-  function setStatus(msg) {
-    document.getElementById("status").textContent = msg || "";
   }
 
   function renderSources() {
     var sources = [];
-    state.rows.forEach(function (r) {
-      if (r.source && sources.indexOf(r.source) === -1) sources.push(r.source);
-    });
+    allRows().forEach(function (r) { if (r.source && sources.indexOf(r.source) === -1) sources.push(r.source); });
     sources.sort();
-    var el = document.getElementById("sources");
-    el.textContent = sources.length ? "Sources: " + sources.join(", ") : "No data loaded";
+    $("#sources").textContent = sources.length ? "src: " + sources.join(", ") : "src: (no data loaded)";
   }
 
-  function renderAll() {
-    var stats = computeStats(state.rows);
-    renderTiles(stats);
-    renderBarChart(state.rows);
-    renderLineChart(state.rows);
-    renderTable(state.rows);
+  function renderAll(newKeys) {
+    renderKPIs();
+    renderLanes(newKeys);
+    renderFeed(newKeys);
+    renderCost();
+    renderFunnel();
+    renderRuns();
     renderSources();
   }
 
+  // ---- time window control ----
+  document.querySelectorAll("#window-seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#window-seg button").forEach(function (b) { b.classList.remove("on"); });
+      btn.classList.add("on");
+      state.window = btn.getAttribute("data-w");
+      renderAll();
+    });
+  });
+
+  // ---- pause / resume ----
+  var pauseBtn = $("#pause");
+  pauseBtn.addEventListener("click", function () {
+    state.paused = !state.paused;
+    pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+    $("#pulse").classList.toggle("stale", state.paused);
+    if (!state.paused && state.bufferedKeys.length) {
+      var keys = state.bufferedKeys;
+      state.bufferedKeys = [];
+      renderAll(keys);
+    } else if (!state.paused) {
+      renderAll();
+    }
+  });
+
+  // ---- initial load ----
   function loadAndRender() {
-    setStatus("Loading…");
     return fetch("/api/rows")
-      .then(function (resp) {
-        if (!resp.ok) throw new Error("HTTP " + resp.status);
-        return resp.json();
-      })
+      .then(function (resp) { if (!resp.ok) throw new Error("HTTP " + resp.status); return resp.json(); })
       .then(function (rows) {
-        state.rows = Array.isArray(rows) ? rows : [];
+        upsertRows(Array.isArray(rows) ? rows : []);
         renderAll();
-        setStatus(state.rows.length ? "" : "No data yet.");
       })
-      .catch(function (err) {
-        setStatus("Failed to load /api/rows: " + err.message);
-        state.rows = [];
+      .catch(function () {
         renderAll();
       });
   }
-
-  document.getElementById("reload-btn").addEventListener("click", loadAndRender);
   loadAndRender();
 
-  // Auto-refresh: poll every 10 s while the tab is visible and the box is checked.
-  var autoBox = document.getElementById("auto-refresh");
-  var lastEl = document.getElementById("last-refresh");
-  function tick() {
-    if (autoBox.checked && document.visibilityState === "visible") {
-      loadAndRender();
-      lastEl.textContent = "· " + new Date().toLocaleTimeString();
-    }
+  // ---- SSE with polling fallback ----
+  var liveLbl = $("#live-lbl");
+  var pulse = $("#pulse");
+  var pollTimer = null;
+  var es = null;
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
-  setInterval(tick, 10000);
-  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") tick(); });
+
+  function startPolling() {
+    if (pollTimer) return;
+    liveLbl.textContent = "POLLING";
+    pulse.classList.add("stale");
+    pollTimer = setInterval(function () {
+      fetch("/api/rows")
+        .then(function (resp) { if (!resp.ok) throw new Error("HTTP " + resp.status); return resp.json(); })
+        .then(function (rows) {
+          var added = upsertRows(Array.isArray(rows) ? rows : []);
+          if (state.paused) {
+            state.bufferedKeys = state.bufferedKeys.concat(added);
+          } else {
+            renderAll(added);
+          }
+        })
+        .catch(function () {});
+    }, 10000);
+  }
+
+  function connectSSE() {
+    try {
+      es = new EventSource("/api/events");
+    } catch (e) {
+      startPolling();
+      return;
+    }
+    es.addEventListener("hello", function () {
+      stopPolling();
+      liveLbl.textContent = state.paused ? "PAUSED" : "LIVE · SSE";
+      pulse.classList.toggle("stale", state.paused);
+    });
+    es.addEventListener("rows", function (ev) {
+      var newRows;
+      try { newRows = JSON.parse(ev.data); } catch (e) { return; }
+      if (!Array.isArray(newRows) || !newRows.length) return;
+      var added = upsertRows(newRows);
+      if (state.paused) {
+        state.bufferedKeys = state.bufferedKeys.concat(added);
+      } else {
+        renderAll(added);
+      }
+    });
+    es.onopen = function () {
+      stopPolling();
+      liveLbl.textContent = state.paused ? "PAUSED" : "LIVE · SSE";
+      pulse.classList.toggle("stale", state.paused);
+    };
+    es.onerror = function () {
+      startPolling();
+    };
+  }
+  connectSSE();
 })();
 </script>
 </body>
@@ -1000,8 +1150,11 @@ def main():
     log_paths = [Path(os.path.expanduser(str(p))) for p in log_arg_paths]
     labels_path = Path(os.path.expanduser(args.labels))
 
-    handler = make_handler(log_paths, labels_path)
-    server = HTTPServer(("127.0.0.1", args.port), handler)
+    tailer = LogTailer(log_paths, labels_path)
+    tailer.start()
+
+    handler = make_handler(log_paths, labels_path, tailer)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     print(f"Serving at http://127.0.0.1:{args.port}")
     try:
         server.serve_forever()

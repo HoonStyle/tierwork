@@ -147,19 +147,23 @@ run to a local log file.
   distribution and `needs_primary_review` share, per-day counts). With no
   argument it reads `TIERWORK_LOG` or `~/.tierwork/reviews.jsonl`.
 - **Status: new, not yet used for a real labeling pass.** `bench/dashboard.py`
-  serves a local, browser-based view of the same log — stat tiles, a couple
-  of charts, and a table with buttons to label `tierwork:bug-validator` rows
-  as true/false positive or unclear for later review. Run it with
+  serves a local, browser-based "mission control" view of the same log — a
+  KPI strip, review swimlanes, a live feed, a tier cost bar, a verdict
+  funnel, and a table with buttons to label `tierwork:bug-validator` rows as
+  true/false positive for later review. The page loads once from `/api/rows`
+  and then stays live via Server-Sent Events (`/api/events`, with a polling
+  fallback if the connection drops), so newly appended log lines show up
+  within about a second without a manual reload. Run it with
   `python3 bench/dashboard.py [--log ~/.tierwork/reviews.jsonl] [--labels ~/.tierwork/labels.jsonl] [--port 8765]`
-  and open the printed URL. It's stdlib-only, binds to `127.0.0.1` only, and
-  makes no external network calls of any kind; labels you add go to
-  `~/.tierwork/labels.jsonl` by default, kept separate from the hook-written
-  log. `--log` can be repeated and can point at a directory of `*.jsonl`
-  files, and the page can export the merged, de-duped data as
-  `/api/export.json`/`/api/export.csv` for moving between machines;
-  `bench/merge.py` merges exported/raw logs from multiple machines into one
-  de-duped JSONL file. See `bench/README.md`'s "Dashboard" section for
-  routes and the full cross-machine workflow.
+  and open the printed URL. It's stdlib-only (including the SSE stream —
+  no third-party deps), binds to `127.0.0.1` only, and makes no external
+  network calls of any kind; labels you add go to `~/.tierwork/labels.jsonl`
+  by default, kept separate from the hook-written log. `--log` can be
+  repeated and can point at a directory of `*.jsonl` files, and the page can
+  export the merged, de-duped data as `/api/export.json`/`/api/export.csv`
+  for moving between machines; `bench/merge.py` merges exported/raw logs from
+  multiple machines into one de-duped JSONL file. See `bench/README.md`'s
+  "Dashboard" section for routes and the full cross-machine workflow.
 
 ## Bench
 
