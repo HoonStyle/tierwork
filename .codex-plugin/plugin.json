@@ -1,0 +1,19 @@
+{
+  "name": "tierwork",
+  "version": "0.1.0",
+  "description": "Model-tier aware sub-agent delegation: policy hook, guideline skill, and gate/review/validate agents",
+  "author": {
+    "name": "HoonStyle"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/HoonStyle/tierwork",
+  "keywords": ["subagent", "delegation", "model-tier", "code-review"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tierwork",
+    "shortDescription": "Model-tier aware sub-agent delegation",
+    "longDescription": "Tierwork ships a sub-agent delegation guideline (which model tier to use for which subtask) as a skill, and injects a short delegation policy at session start via a hook.",
+    "developerName": "HoonStyle",
+    "category": "Productivity"
+  }
+}

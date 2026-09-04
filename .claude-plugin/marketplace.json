@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "tierwork",
+  "description": "Model-tier aware sub-agent delegation: policy hook, guideline skill, and gate/review/validate agents",
+  "owner": {
+    "name": "HoonStyle"
+  },
+  "plugins": [
+    {
+      "name": "tierwork",
+      "source": "./",
+      "description": "Model-tier aware sub-agent delegation: policy hook, guideline skill, and gate/review/validate agents",
+      "category": "productivity"
+    }
+  ]
+}
