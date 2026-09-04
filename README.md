@@ -181,6 +181,8 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
+- 0.5.0 (2026-09-04): first tagged release. Dashboard export (JSON/CSV with labels), multi-source `--log` with de-dup, `bench/merge.py` for cross-machine collection; y-axis title fix.
+
 - 0.4.3 (2026-09-04): bench/dashboard.py — local (127.0.0.1) dashboard over reviews.jsonl with stat tiles, tokens by agent type, tokens over time, run table, and manual true/false-positive labels saved to ~/.tierwork/labels.jsonl. Rendering checked once with headless Chrome.
 
 - 0.4.2 (2026-09-04): log hook waits (<=2 s) for the sub-agent's final text record; SubagentStop was observed firing ~200 ms before it was flushed, leaving verdict/proceed empty. Live-verified once on tierwork:gate.
