@@ -109,6 +109,57 @@ def parse_field(text, field):
     return val
 
 
+def handle_subagent_start(session_id, agent_id, agent_type, transcript_path, cwd):
+    """Append a lightweight 'running' record for a just-spawned tierwork
+    sub-agent. Never waits for/polls the transcript and never computes
+    token stats -- SubagentStop's record later supersedes this one."""
+    description = None
+    try:
+        if transcript_path and session_id and agent_id:
+            main_dir = os.path.dirname(transcript_path)
+            if main_dir:
+                candidate = os.path.join(
+                    main_dir, session_id, "subagents", "agent-%s.jsonl" % agent_id
+                )
+                meta_path = re.sub(r"\.jsonl$", ".meta.json", candidate)
+                if os.path.isfile(meta_path):
+                    with open(meta_path, "r", encoding="utf-8", errors="replace") as f:
+                        meta = json.load(f)
+                    if isinstance(meta, dict):
+                        description = meta.get("description") or None
+    except Exception:
+        description = None
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    log_path = os.environ.get("TIERWORK_LOG") or os.path.join(
+        os.path.expanduser("~"), ".tierwork", "reviews.jsonl"
+    )
+    try:
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    except OSError:
+        return 0
+
+    record = {
+        "ts": ts,
+        "session_id": session_id or None,
+        "agent_id": agent_id or None,
+        "agent_type": agent_type,
+        "status": "running",
+        "description": description,
+        "cwd": cwd or None,
+    }
+
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+            f.write("\n")
+    except OSError:
+        return 0
+
+    return 0
+
+
 def main():
     try:
         raw = sys.stdin.read()
@@ -122,6 +173,8 @@ def main():
     if not isinstance(data, dict):
         return 0
 
+    hook_event_name = data.get("hook_event_name") or ""
+
     agent_type = data.get("agent_type") or ""
     if not agent_type or not agent_type.startswith("tierwork:"):
         return 0
@@ -130,6 +183,14 @@ def main():
     agent_id = data.get("agent_id") or ""
     transcript_path = data.get("transcript_path") or ""
     cwd = data.get("cwd") or ""
+
+    if hook_event_name == "SubagentStart":
+        return handle_subagent_start(
+            session_id, agent_id, agent_type, transcript_path, cwd
+        )
+
+    if hook_event_name != "SubagentStop":
+        return 0
 
     agent_transcript = ""
     if transcript_path and session_id and agent_id:
@@ -214,6 +275,7 @@ def main():
         "session_id": session_id or None,
         "agent_id": agent_id or None,
         "agent_type": agent_type,
+        "status": "done",
         "spawn_model": spawn_model or None,
         "models": stats.get("models") or [],
         "msgs": stats.get("msgs") or 0,

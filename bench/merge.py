@@ -8,9 +8,12 @@ Usage:
 
 Each input may be a single .jsonl file or a directory (globbed
 non-recursively for *.jsonl, sorted for determinism). Rows are de-duplicated
-by (session_id, agent_id), keeping the row with the latest `ts` (same rule
-bench/dashboard.py uses for --log). Each row is tagged with a `source` field
-set to the basename of the file it came from.
+by (session_id, agent_id): a "done" row (or a legacy row with no `status`
+field, which predates the SubagentStart hook) always wins over a "running"
+row for the same key; among rows sharing the same win-tier, the one with the
+latest `ts` wins (same rule bench/dashboard.py uses for --log and its
+/api/rows, /api/export.* and SSE endpoints). Each row is tagged with a
+`source` field set to the basename of the file it came from.
 
 Stdlib only, no third-party deps. Does not start any server.
 """

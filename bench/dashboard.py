@@ -99,25 +99,48 @@ def _parse_ts(row):
         return None
 
 
+def _status_rank(row):
+    """Win-tier for the merge rule: a "done" row (or a legacy row with no
+    `status` field at all, since it predates the SubagentStart hook) always
+    outranks a "running" row. Returns 1 for done/legacy, 0 for running."""
+    status = row.get("status")
+    if status is None or status == "done":
+        return 1
+    if status == "running":
+        return 0
+    # Unknown/future status values: treat like done/legacy (highest rank)
+    # rather than silently losing to a running row.
+    return 1
+
+
 def dedup_rows(rows):
-    """De-duplicate rows by (session_id, agent_id), keeping the row with the
-    latest parsed `ts`. Rows with a missing/unparseable ts are treated as the
-    lowest priority. On a tie (or comparison error), the later-loaded row
-    wins. Pure function, order of `rows` matters only as a tie-breaker."""
+    """De-duplicate rows by (session_id, agent_id).
+
+    Merge rule: a row's win-tier (`_status_rank`) is compared first -- a
+    "done"/legacy row always beats a "running" row sharing the same key,
+    regardless of `ts`. Among rows sharing both the same key and the same
+    win-tier, the row with the latest parsed `ts` wins; rows with a
+    missing/unparseable ts are treated as the lowest priority within their
+    tier. On a tie (or comparison error), the later-loaded row wins. Pure
+    function, order of `rows` matters only as a tie-breaker."""
     best = {}
     order = {}
     for i, row in enumerate(rows):
         key = (row.get("session_id"), row.get("agent_id"))
+        rank = _status_rank(row)
         parsed = _parse_ts(row)
         current = best.get(key)
         if current is None:
             best[key] = row
-            order[key] = (parsed, i)
+            order[key] = (rank, parsed, i)
             continue
-        cur_parsed, cur_i = order[key]
-        # None (unparseable) sorts as lowest priority; ties/later-loaded win.
+        cur_rank, cur_parsed, cur_i = order[key]
         take_new = False
-        if parsed is None and cur_parsed is None:
+        if rank != cur_rank:
+            take_new = rank > cur_rank
+        # Same win-tier: latest ts wins; None (unparseable) sorts lowest;
+        # ties/later-loaded win.
+        elif parsed is None and cur_parsed is None:
             take_new = i >= cur_i
         elif parsed is None:
             take_new = False
@@ -129,7 +152,7 @@ def dedup_rows(rows):
             take_new = i >= cur_i
         if take_new:
             best[key] = row
-            order[key] = (parsed, i)
+            order[key] = (rank, parsed, i)
     return list(best.values())
 
 
@@ -528,6 +551,8 @@ PAGE_HTML = r"""<!doctype html>
   .brand h1 { font: 700 20px/1 var(--display); letter-spacing: .04em; margin: 0; text-transform: uppercase; }
   .brand span { font-family: var(--mono); color: var(--muted); font-size: 12px; }
   .status { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .status-col { display: flex; flex-direction: column; gap: 1px; line-height: 1.25; }
+  .inflight { font-size: 10px; color: var(--dim); }
   .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 0 rgba(255,255,255,.5); animation: pulse 1.6s ease-out infinite; }
   .pulse.stale { background: var(--warn); animation: none; }
   @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255,255,255,.45);} 100% { box-shadow: 0 0 0 10px rgba(255,255,255,0);} }
@@ -577,6 +602,8 @@ PAGE_HTML = r"""<!doctype html>
   .dot { cursor: pointer; }
   .dot.enter { animation: slidein .5s cubic-bezier(.2,.8,.2,1) both; }
   @keyframes slidein { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .dot.running { animation: dotpulse 1.6s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  @keyframes dotpulse { 0%, 100% { opacity: .55; transform: scale(1); } 50% { opacity: 1; transform: scale(1.18); } }
   .tip { position: absolute; pointer-events: none; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 10px; font: 11px/1.5 var(--mono); color: var(--text); white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,.35); }
 
   .feed { display: flex; flex-direction: column; max-height: 360px; overflow-y: auto; }
@@ -597,6 +624,7 @@ PAGE_HTML = r"""<!doctype html>
   .v.confirmed { color: var(--ok); border-color: var(--ok); }
   .v.refuted { color: var(--bad); border-color: var(--bad); }
   .v.inconclusive { color: var(--muted); border-color: var(--muted); border-style: dashed; }
+  .v.running { color: var(--muted); border-color: var(--muted); border-style: dashed; }
 
   /* second row */
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
@@ -636,14 +664,14 @@ PAGE_HTML = r"""<!doctype html>
   .empty-inline { color: var(--muted); padding: 48px 12px; text-align: center; font-size: 13px; }
 
   @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } .hero, .row2 { grid-template-columns: 1fr; } }
-  @media (prefers-reduced-motion: reduce) { .pulse, .dot.enter, .feed li.enter { animation: none !important; } .bar div, .step .fill { transition: none !important; } }
+  @media (prefers-reduced-motion: reduce) { .pulse, .dot.enter, .dot.running, .feed li.enter { animation: none !important; } .bar div, .step .fill { transition: none !important; } }
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
     <div class="brand"><h1>Tierwork</h1><span>mission control</span></div>
-    <div class="status"><span class="pulse" id="pulse"></span><span id="live-lbl">LIVE · SSE</span><span>·</span><span id="last-ev">last event —</span></div>
+    <div class="status"><span class="pulse" id="pulse"></span><span class="status-col"><span id="live-lbl">LIVE · SSE</span><span class="inflight" id="inflight">in flight: 0</span></span><span>·</span><span id="last-ev">last event —</span></div>
     <div class="spacer"></div>
     <div class="seg" id="window-seg">
       <button type="button" data-w="24h" class="on">24h</button>
@@ -745,13 +773,46 @@ PAGE_HTML = r"""<!doctype html>
     return isNaN(t) ? null : t;
   }
 
+  // Win-tier for the merge rule, mirroring bench/dashboard.py's
+  // dedup_rows/_status_rank: a "done" row (or a legacy row with no `status`
+  // field at all, since it predates the SubagentStart hook) always beats a
+  // "running" row for the same key.
+  function statusRank(row) {
+    var s = row.status;
+    if (s === undefined || s === null || s === "done") return 1;
+    if (s === "running") return 0;
+    return 1;
+  }
+  function isRunningRow(row) { return statusRank(row) === 0; }
+  function isDoneRow(row) { return statusRank(row) === 1; }
+
   function upsertRows(list) {
     var added = [];
     list.forEach(function (r) {
       var k = rowKey(r);
-      var already = state.byKey.has(k);
-      state.byKey.set(k, r);
-      if (!already) added.push(k);
+      var existing = state.byKey.get(k);
+      if (!existing) {
+        state.byKey.set(k, r);
+        added.push(k);
+        return;
+      }
+      var newRank = statusRank(r), curRank = statusRank(existing);
+      var take;
+      if (newRank !== curRank) {
+        take = newRank > curRank;
+      } else {
+        var nt = tsMillis(r), ct = tsMillis(existing);
+        if (nt === null && ct === null) take = true;
+        else if (nt === null) take = false;
+        else if (ct === null) take = true;
+        else take = nt >= ct;
+      }
+      if (take) {
+        state.byKey.set(k, r);
+        // A running row upgraded to done in place: replay the "just
+        // arrived" enter animation as if it were newly added.
+        if (newRank > curRank) added.push(k);
+      }
     });
     return added;
   }
@@ -788,8 +849,9 @@ PAGE_HTML = r"""<!doctype html>
     var labeled = vals.filter(function (r) { return !!r.label; }).length;
     var opusTok = rows.filter(function (r) { return tierOf(r) === "opus"; }).reduce(function (a, r) { return a + num(r.output_tokens); }, 0);
 
+    var doneRows = rows.filter(isDoneRow);
     var k = [
-      ["Sub-agent runs", rows.length ? fmt(rows.length) : "—"],
+      ["Sub-agent runs", doneRows.length ? fmt(doneRows.length) : "—"],
       ["Validators confirmed", vals.length ? Math.round(conf / vals.length * 100) + "%" : "—", vals.length ? conf + " of " + vals.length : ""],
       ["Needs primary review", vals.length ? Math.round(prim / vals.length * 100) + "%" : "—", vals.length ? prim + " findings" : ""],
       ["Output tokens", rows.length ? fmt(tok) : "—", "all tiers"],
@@ -888,12 +950,23 @@ PAGE_HTML = r"""<!doctype html>
       }
       if (r.verdict === "refuted") { s.setAttribute("stroke", "var(--bad)"); s.setAttribute("stroke-width", "2"); s.setAttribute("fill-opacity", ".35"); }
       if (r.verdict === "inconclusive") { s.setAttribute("stroke-dasharray", "2 2"); s.setAttribute("stroke", col); s.setAttribute("fill-opacity", ".25"); }
-      s.setAttribute("class", "dot" + (newKeySet.has(rowKey(r)) && !reduce ? " enter" : ""));
+      var running = isRunningRow(r);
+      if (running) {
+        // No end ts yet: render hollow (stroke only) at the start ts, with
+        // a soft pulse (handled purely in CSS via transform/opacity).
+        s.setAttribute("fill", col);
+        s.setAttribute("fill-opacity", ".15");
+        s.setAttribute("stroke", col);
+        s.setAttribute("stroke-width", "1.5");
+      }
+      s.setAttribute("class", "dot" + (running ? " running" : "") + (newKeySet.has(rowKey(r)) && !reduce ? " enter" : ""));
       s.setAttribute("tabindex", "0");
-      s.setAttribute("aria-label", (r.agent_type || "") + " " + tier + " " + fmt(num(r.output_tokens)) + " output tokens " + (r.verdict || ""));
+      s.setAttribute("aria-label", (r.agent_type || "") + " " + tier + " " + fmt(num(r.output_tokens)) + " output tokens " + (running ? "running" : (r.verdict || "")));
       var show = function (ev) {
         tip.hidden = false;
-        tip.innerHTML = "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + "<br>out " + fmt(num(r.output_tokens)) + " · msgs " + esc(r.msgs) + " · tools " + esc(r.tool_calls) + (r.verdict ? "<br>verdict " + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " · conf " + esc(r.confidence) : "") : "");
+        tip.innerHTML = running
+          ? "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + '<br><span class="v running">running</span>'
+          : "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + "<br>out " + fmt(num(r.output_tokens)) + " · msgs " + esc(r.msgs) + " · tools " + esc(r.tool_calls) + (r.verdict ? "<br>verdict " + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " · conf " + esc(r.confidence) : "") : "");
         var b = svg.getBoundingClientRect();
         var pt = ev.clientX ? { x: ev.clientX - b.left, y: ev.clientY - b.top } : { x: x, y: y };
         tip.style.left = Math.min(pt.x + 12, b.width - 240) + "px";
@@ -915,11 +988,38 @@ PAGE_HTML = r"""<!doctype html>
     var recent = rows.slice().sort(function (a, b) { return tsMillis(b) - tsMillis(a); }).slice(0, 14);
     feed.innerHTML = recent.map(function (r) {
       var tier = tierOf(r);
-      return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what"><b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " " + esc(r.confidence) : "") + "</span>" : "") + "<small>" + esc(r.description || "") + " · " + new Date(tsMillis(r)).toLocaleTimeString() + "</small></span><span class=\"tok num\">" + fmt(num(r.output_tokens)) + "<br>tok</span></li>";
+      var running = isRunningRow(r);
+      var verdictHtml = running
+        ? '<span class="v running">running</span>'
+        : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " " + esc(r.confidence) : "") + "</span>" : "");
+      var smallHtml = running
+        ? esc(r.description || "") + ' · <span class="running-elapsed" data-start="' + tsMillis(r) + '">running · 0s</span>'
+        : esc(r.description || "") + " · " + new Date(tsMillis(r)).toLocaleTimeString();
+      var tokHtml = running ? "" : fmt(num(r.output_tokens)) + "<br>tok";
+      return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what"><b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + verdictHtml + "<small>" + smallHtml + "</small></span><span class=\"tok num\">" + tokHtml + "</span></li>";
     }).join("");
+    updateRunningElapsed();
     $("#feed-n").textContent = rows.length + " events";
     var lastT = rows.length ? Math.max.apply(null, rows.map(function (r) { return tsMillis(r); })) : null;
     $("#last-ev").textContent = "last event " + (lastT ? new Date(lastT).toLocaleTimeString() : "—");
+  }
+
+  // ---- Running-row elapsed-time ticker (client-side only, no server poll) ----
+  function updateRunningElapsed() {
+    var now = Date.now();
+    document.querySelectorAll(".running-elapsed").forEach(function (span) {
+      var start = parseInt(span.getAttribute("data-start"), 10);
+      if (isNaN(start)) return;
+      var secs = Math.max(0, Math.round((now - start) / 1000));
+      span.textContent = "running · " + secs + "s";
+    });
+  }
+  setInterval(updateRunningElapsed, 1000);
+
+  // ---- "in flight" indicator under the LIVE label ----
+  function renderInFlight() {
+    var n = allRows().filter(isRunningRow).length;
+    $("#inflight").textContent = "in flight: " + n;
   }
 
   // ---- Cost bar ----
@@ -983,6 +1083,10 @@ PAGE_HTML = r"""<!doctype html>
     var sorted = rows.slice().sort(function (a, b) { return tsMillis(b) - tsMillis(a); }).slice(0, 200);
     tb.innerHTML = sorted.map(function (r) {
       var tier = tierOf(r);
+      var running = isRunningRow(r);
+      var verdictCell = running
+        ? '<span class="v running">running</span>'
+        : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—");
       return "<tr class=\"row\">" +
         '<td class="mono">' + new Date(tsMillis(r)).toLocaleTimeString() + "</td>" +
         "<td>" + esc((r.agent_type || "").replace("tierwork:", "")) + "</td>" +
@@ -990,7 +1094,7 @@ PAGE_HTML = r"""<!doctype html>
         '<td class="mono">' + esc(r.msgs) + "</td>" +
         '<td class="mono">' + esc(r.tool_calls) + "</td>" +
         '<td class="mono">' + fmt(num(r.output_tokens)) + "</td>" +
-        "<td>" + (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—") + "</td>" +
+        "<td>" + verdictCell + "</td>" +
         '<td class="mono">' + (r.confidence !== undefined && r.confidence !== null && r.confidence !== "" ? esc(r.confidence) : "—") + "</td>" +
         "<td>" + (r.verdict ? (isPrimary(r) ? '<span style="color:var(--warn)">yes</span>' : "no") : "—") + "</td>" +
         "<td>" + esc(r.description || "") + "</td>" +
@@ -1037,6 +1141,7 @@ PAGE_HTML = r"""<!doctype html>
     renderFunnel();
     renderRuns();
     renderSources();
+    renderInFlight();
   }
 
   // ---- time window control ----

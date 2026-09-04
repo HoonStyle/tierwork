@@ -129,6 +129,18 @@ sub-agent's transcript, computes token/tool-call counts and (for
 `proceed` out of its final message, and appends one JSON line describing the
 run to a local log file.
 
+A companion `SubagentStart` hook fires the moment a tierwork sub-agent is
+spawned and appends a lightweight `status: "running"` record for the same
+`(session_id, agent_id)` key, immediately and without reading any
+transcript or computing tokens; the later `SubagentStop` record (now
+carrying `status: "done"`) supersedes it. code.claude.com/docs/en/hooks
+documents `agent_id`/`agent_type` as present for `SubagentStart` the same
+way as for `SubagentStop`, but does not document a `description` field on
+either event's hook input — this script's `description` was always sourced
+from a sibling `*.meta.json` file next to the sub-agent transcript, not from
+the hook input itself, and both `agent_type` and that meta-file lookup are
+treated as possibly absent/missing without raising an error.
+
 - Log location: `~/.tierwork/reviews.jsonl` by default. Override with the
   `TIERWORK_LOG` environment variable (set it before starting Claude Code /
   Codex so the hook picks it up).
@@ -162,8 +174,15 @@ run to a local log file.
   repeated and can point at a directory of `*.jsonl` files, and the page can
   export the merged, de-duped data as `/api/export.json`/`/api/export.csv`
   for moving between machines; `bench/merge.py` merges exported/raw logs from
-  multiple machines into one de-duped JSONL file. See `bench/README.md`'s
-  "Dashboard" section for routes and the full cross-machine workflow.
+  multiple machines into one de-duped JSONL file. As of 0.6.1 it also
+  understands the `SubagentStart` hook's `status: "running"` rows: a
+  `"done"` (or legacy, no-`status`) row always wins the merge over a
+  `"running"` row for the same key, else the latest `ts` wins; in-flight runs
+  render as a pulsing hollow swimlane mark, a live-feed "running · Xs" line,
+  and a dashed "running" verdict chip, are excluded from the "Sub-agent
+  runs" KPI, and are counted in a new "in flight: N" status line. See
+  `bench/README.md`'s "Dashboard" section for routes and the full
+  cross-machine workflow.
 
 ## Bench
 
@@ -191,6 +210,19 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
 ## Changelog
+
+- 0.6.1 (2026-09-04): added `SubagentStart` hook (lightweight `status:
+  "running"` record per sub-agent, written the moment it's spawned) and
+  matching running-row support in the dashboard: merge rule is
+  `"done"`/legacy always beats `"running"` for the same
+  `(session_id, agent_id)`, else latest `ts` wins, applied identically by
+  `/api/rows`, `/api/export.json`/`.csv`, the SSE broadcast, and
+  `bench/merge.py`; in-flight runs get a pulsing hollow swimlane mark, a
+  live "running · Xs" feed line, and a dashed "running" verdict chip, are
+  excluded from the "Sub-agent runs" KPI, and are counted in a new
+  "in flight: N" status line; a `"done"` row arriving over SSE for a
+  currently-running key replaces it in place with the enter animation.
+  Version bump only, no other behavior change.
 
 - 0.6.0 (2026-09-04): dashboard redesigned as a mission-control view: swimlanes per agent lane (tier = color + shape, size = output tokens), live feed, KPI strip with sparklines, tier cost bar, verdict funnel, runs table with labels; Server-Sent Events push appended rows with a 10 s polling fallback; 24h/7d/all windows with a window-fixed time axis; light/dark tokens; reduced-motion respected. Plugin hooks and agents unchanged.
 

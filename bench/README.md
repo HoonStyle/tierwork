@@ -50,9 +50,15 @@ directory (directories are globbed non-recursively for `*.jsonl`, sorted for
 determinism). With no `--log` at all it falls back to `TIERWORK_LOG` or
 `~/.tierwork/reviews.jsonl`, same as before. Rows from all resolved files are
 loaded, each tagged with a `source` field (the basename of the file it came
-from), and de-duplicated across files by `session_id`+`agent_id`, keeping the
-row with the latest `ts`. `--labels` stays a single file — labels are always
-this machine's own labels file.
+from), and de-duplicated across files by `session_id`+`agent_id`. The dedup
+rule: a `"done"` row (or a legacy row with no `status` field at all, which
+predates the `SubagentStart` hook) always wins over a `"running"` row for the
+same key, regardless of `ts`; among rows sharing the same key **and** the
+same win-tier (two `"running"` rows, or two `"done"`/legacy rows), the row
+with the latest `ts` wins. This rule is applied identically by `/api/rows`,
+`/api/export.json`, `/api/export.csv`, the SSE append/broadcast logic, and
+`bench/merge.py`. `--labels` stays a single file — labels are always this
+machine's own labels file.
 
 then open the printed `http://127.0.0.1:<port>` URL. The page ("tierwork
 mission control") loads real data from `/api/rows` on open and stays live
@@ -65,7 +71,16 @@ colored by model tier — haiku/sonnet/opus, with an "unknown" hollow-grey mark
 when the tier can't be determined from `spawn_model`/`models`), a live feed
 of recent runs, a tier cost bar (haiku/sonnet/opus list price per 1M output
 tokens — list price, not spend), a verdict funnel, and a runs table with
-inline TP/FP label buttons. A 24h / 7d / all segmented control filters
+inline TP/FP label buttons. In-flight (`status: "running"`) sub-agent runs
+are rendered too: a hollow, softly pulsing mark on the swimlane at the run's
+start `ts` (no end `ts` yet), a "running · Xs" live-feed line with a
+client-side elapsed-seconds ticker (no server polling needed), and a dashed,
+muted "running" chip in the runs table verdict column. The "Sub-agent runs"
+KPI counts only `"done"`/legacy rows, never `"running"` ones, and a small
+"in flight: N" line under the LIVE/SSE status label shows the current count
+of running rows. When a run's `"done"` record arrives over SSE for a key
+that currently shows a `"running"` row, it replaces that row in place and
+replays the normal SSE "new row" enter animation. A 24h / 7d / all segmented control filters
 everything client-side by `ts` and adapts the swimlane time-axis ticks to
 match. The server process itself is a `ThreadingHTTPServer` (rather than a
 plain `HTTPServer`) so a long-lived SSE connection doesn't block other

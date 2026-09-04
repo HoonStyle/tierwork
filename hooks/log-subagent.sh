@@ -20,6 +20,66 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=find-python.sh
 . "$DIR/find-python.sh"
 
+# jq-based "running" record for SubagentStart (fallback when python is
+# unavailable). Does not wait for/poll any transcript.
+run_jq_start() {
+  local input="$1"
+
+  command -v jq >/dev/null 2>&1 || return 0
+
+  local agent_type
+  agent_type="$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)" || return 0
+  [ -n "$agent_type" ] || return 0
+
+  case "$agent_type" in
+    tierwork:*) ;;
+    *) return 0 ;;
+  esac
+
+  local session_id agent_id transcript_path cwd
+  session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
+  agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+  transcript_path="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)"
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+
+  # Best-effort sibling meta.json lookup, same derived path as SubagentStop.
+  local description=""
+  if [ -n "$transcript_path" ] && [ -n "$session_id" ] && [ -n "$agent_id" ]; then
+    local main_dir candidate meta_path
+    main_dir="$(dirname "$transcript_path" 2>/dev/null)"
+    if [ -n "$main_dir" ]; then
+      candidate="$main_dir/$session_id/subagents/agent-$agent_id.jsonl"
+      meta_path="${candidate%.jsonl}.meta.json"
+      [ -f "$meta_path" ] && description="$(jq -r '.description // empty' "$meta_path" 2>/dev/null)"
+    fi
+  fi
+
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+
+  local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
+
+  jq -nc \
+    --arg ts "$ts" \
+    --arg session_id "$session_id" \
+    --arg agent_id "$agent_id" \
+    --arg agent_type "$agent_type" \
+    --arg description "$description" \
+    --arg cwd "$cwd" \
+    '{
+      ts: $ts,
+      session_id: ($session_id // null),
+      agent_id: ($agent_id // null),
+      agent_type: $agent_type,
+      status: "running",
+      description: (if $description == "" then null else $description end),
+      cwd: (if $cwd == "" then null else $cwd end)
+    }' >> "$log_path" 2>/dev/null
+
+  return 0
+}
+
 # jq-based implementation (fallback when python is unavailable).
 run_jq() {
   local input="$1"
@@ -162,6 +222,7 @@ run_jq() {
       session_id: ($session_id // null),
       agent_id: ($agent_id // null),
       agent_type: $agent_type,
+      status: "done",
       spawn_model: (if $spawn_model == "" then null else $spawn_model end),
       models: $models,
       msgs: $msgs,
@@ -177,6 +238,49 @@ run_jq() {
       cwd: (if $cwd == "" then null else $cwd end),
       description: (if $description == "" then null else $description end)
     }' >> "$log_path" 2>/dev/null
+
+  return 0
+}
+
+# Minimal fallback (no jq, no python) for SubagentStart: emit a single-line
+# "running" record with plain grep/sed extraction. No transcript/meta.json
+# lookup here -- description is omitted (left out of the object) in this path.
+run_minimal_start() {
+  local input="$1"
+
+  local agent_type session_id agent_id
+  agent_type="$(printf '%s' "$input" | grep -o '"agent_type"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+  [ -n "$agent_type" ] || return 0
+  case "$agent_type" in
+    tierwork:*) ;;
+    *) return 0 ;;
+  esac
+
+  session_id="$(printf '%s' "$input" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+  agent_id="$(printf '%s' "$input" | grep -o '"agent_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+
+  json_escape() {
+    local val="$1"
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    val="${val//$'\n'/\\n}"
+    printf '%s' "$val"
+  }
+
+  local ts_e session_id_e agent_id_e agent_type_e
+  ts_e="$(json_escape "$ts")"
+  session_id_e="$(json_escape "$session_id")"
+  agent_id_e="$(json_escape "$agent_id")"
+  agent_type_e="$(json_escape "$agent_type")"
+
+  local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
+
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"running"}\n' \
+    "$ts_e" "$session_id_e" "$agent_id_e" "$agent_type_e" >> "$log_path" 2>/dev/null
 
   return 0
 }
@@ -225,7 +329,7 @@ run_minimal() {
   local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
   mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
 
-  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","missing_tool":"python3+jq"}\n' \
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"done","missing_tool":"python3+jq"}\n' \
     "$ts_e" "$session_id_e" "$agent_id_e" "$agent_type_e" >> "$log_path" 2>/dev/null
 
   return 0
@@ -242,13 +346,36 @@ main() {
     return 0
   fi
 
+  # No python available: the jq/minimal fallbacks below don't get python's
+  # internal hook_event_name dispatch, so branch on it here ourselves.
+  local hook_event_name=""
   if command -v jq >/dev/null 2>&1; then
-    run_jq "$input"
-    return 0
+    hook_event_name="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)"
+  else
+    hook_event_name="$(printf '%s' "$input" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
   fi
 
-  run_minimal "$input"
-  return 0
+  case "$hook_event_name" in
+    SubagentStart)
+      if command -v jq >/dev/null 2>&1; then
+        run_jq_start "$input"
+      else
+        run_minimal_start "$input"
+      fi
+      return 0
+      ;;
+    SubagentStop)
+      if command -v jq >/dev/null 2>&1; then
+        run_jq "$input"
+      else
+        run_minimal "$input"
+      fi
+      return 0
+      ;;
+    *)
+      return 0
+      ;;
+  esac
 }
 
 main "$@" 2>/dev/null
