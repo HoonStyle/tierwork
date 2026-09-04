@@ -131,6 +131,8 @@ placeholder (see "Unverified items" below).
 
 ## Changelog
 
+- 0.3.1 (2026-09-04): fix: removed `hooks` from `.claude-plugin/plugin.json`. Claude Code auto-loads `hooks/hooks.json`; naming it again in the manifest makes the loader report "Duplicate hooks file detected" and mark the plugin failed to load (seen on 0.2.1 and 0.3.0, macOS and Windows). Reported by the user from another machine.
+
 - 0.3.0 (2026-09-04): bug-validator maxTurns 12 (run D had a 30-turn
   validator), bug-hunter maxTurns 15; gate now runs in parallel with a
   provisional-tier bug-hunter, and only a stake signal triggers an opus
