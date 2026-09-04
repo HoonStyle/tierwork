@@ -113,6 +113,33 @@ placeholder (see "Unverified items" below).
    (`codex plugin marketplace add HoonStyle/tierwork --ref main`) rather than
    a local path.
 
+## Data log
+
+**Status: new in 0.4.1, UNVERIFIED end-to-end** — built against the
+documented `SubagentStop` hook input fields (`session_id`,
+`transcript_path`, `cwd`, `hook_event_name`, and in sub-agent context
+`agent_id`, `agent_type`) at code.claude.com/docs/en/hooks, but not yet
+confirmed to fire correctly across a real multi-agent tierwork session.
+
+A `SubagentStop` hook (`hooks/log-subagent.sh`) runs after every sub-agent
+finishes. It does nothing unless the finished sub-agent's `agent_type`
+starts with `tierwork:`. For a tierwork sub-agent, it locates that
+sub-agent's transcript, computes token/tool-call counts and (for
+`bug-validator`) parses `verdict`, `confidence`, `needs_primary_review`, and
+`proceed` out of its final message, and appends one JSON line describing the
+run to a local log file.
+
+- Log location: `~/.tierwork/reviews.jsonl` by default. Override with the
+  `TIERWORK_LOG` environment variable (set it before starting Claude Code /
+  Codex so the hook picks it up).
+- The log is local only — nothing is sent anywhere by this hook.
+- The hook never blocks the session: it exits 0 and prints nothing even if
+  it cannot find a transcript, jq is missing, or the input is malformed.
+- Run `bench/report.py [path]` to print aggregate stats from the log
+  (per-`agent_type` counts/models/tokens, bug-validator verdict
+  distribution and `needs_primary_review` share, per-day counts). With no
+  argument it reads `TIERWORK_LOG` or `~/.tierwork/reviews.jsonl`.
+
 ## Bench
 
 `bench/` holds a small A/B harness for comparing review runs with the
@@ -140,6 +167,7 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
+- 0.4.1 (2026-09-04): SubagentStop hook appends one line per tierwork sub-agent to ~/.tierwork/reviews.jsonl (model, tokens, tool calls, verdict/confidence/needs_primary_review); bench/report.py aggregates it.
 - 0.4.0 (2026-09-04): removed gate diff sizing and per-spawn tiers; two opus
   bug-hunters (diff-only, introduced-logic) in parallel; validators opus for
   bugs, sonnet for compliance (as in claude-code /code-review); primary
