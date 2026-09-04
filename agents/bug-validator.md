@@ -1,6 +1,6 @@
 ---
 name: bug-validator
-description: Use this agent to validate exactly one finding from bug-hunter or compliance-reviewer before it is reported or acted on. Give it the change's title/description and the single finding (file:line, description, reason tag). It re-derives the verdict from the cited code and never trusts the finder's description at face value.
+description: Use this agent to validate exactly one finding from bug-hunter or compliance-reviewer before it is reported or acted on. Run tierwork:gate first and pass its tier as the per-spawn model; do not launch this agent without a gate result. Give it the change's title/description and the single finding (file:line, description, reason tag). It re-derives the verdict from the cited code and never trusts the finder's description at face value.
 model: opus
 effort: high
 tools: Read, Grep, Glob, Bash

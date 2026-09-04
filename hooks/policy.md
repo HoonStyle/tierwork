@@ -32,13 +32,14 @@
   confidence score or level, and explicit gaps/blockers.
 - Deterministic checks gate LLM verdicts, never the reverse.
 
-Shipped agents (Claude only, scoped names):
-- `tierwork:gate` (haiku): eligibility, CLAUDE.md paths, and diff sizing; it
-  returns `review_tier` and `validation_tier`. Launch bug-hunter and
-  bug-validator with `model:` set to those tiers.
+Shipped agents (Claude only, scoped names). Code-review order is fixed:
+1. `tierwork:gate` (haiku) FIRST, for every review, including tiny diffs
+   (small diffs are where it saves the most). It returns `review_tier` and
+   `validation_tier`.
+2. `tierwork:bug-hunter` with `model: <review_tier>`; `tierwork:bug-validator`
+   with `model: <validation_tier>`, one per finding. Never launch either
+   without a gate result; their `model: opus` default is a fallback only.
 - `tierwork:compliance-reviewer` (sonnet) — CLAUDE.md compliance audit.
-- `tierwork:bug-hunter` (opus) — diff-only or introduced-logic bug scanning.
-- `tierwork:bug-validator` (opus) — re-derives the verdict for one finding.
 
 Before designing any fan-out of 3+ sub-agents, load the `subagent-delegation`
 skill for the full guideline.
