@@ -496,6 +496,7 @@ PAGE_HTML = r"""<!doctype html>
   <p id="sources" class="sub"></p>
   <div class="toolbar">
     <button id="reload-btn" type="button">Reload</button>
+    <label class="auto"><input id="auto-refresh" type="checkbox" checked> Auto-refresh (10 s) <span id="last-refresh"></span></label>
     <a href="/api/export.json">Export JSON</a>
     <a href="/api/export.csv">Export CSV</a>
     <span id="status" style="color: var(--text-secondary);"></span>
@@ -962,6 +963,18 @@ PAGE_HTML = r"""<!doctype html>
 
   document.getElementById("reload-btn").addEventListener("click", loadAndRender);
   loadAndRender();
+
+  // Auto-refresh: poll every 10 s while the tab is visible and the box is checked.
+  var autoBox = document.getElementById("auto-refresh");
+  var lastEl = document.getElementById("last-refresh");
+  function tick() {
+    if (autoBox.checked && document.visibilityState === "visible") {
+      loadAndRender();
+      lastEl.textContent = "· " + new Date().toLocaleTimeString();
+    }
+  }
+  setInterval(tick, 10000);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") tick(); });
 })();
 </script>
 </body>
