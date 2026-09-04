@@ -6,12 +6,23 @@
 # Documented hook input fields (code.claude.com/docs/en/hooks): session_id,
 # transcript_path, cwd, hook_event_name; in sub-agent context also agent_id,
 # agent_type. All are treated as possibly missing.
+#
+# This is a thin launcher: the transcript-parsing logic lives in
+# hooks/log-subagent.py (stdlib-only Python 3), used whenever a python3 (or,
+# on Windows Git Bash, python) interpreter is available. If no Python is
+# found, it falls back to a jq implementation. If neither python nor jq is
+# available, it appends a minimal record so the log still gets created.
 
 set -u
 
-main() {
-  local input
-  input="$(cat)" || return 0
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=find-python.sh
+. "$DIR/find-python.sh"
+
+# jq-based implementation (fallback when python is unavailable).
+run_jq() {
+  local input="$1"
 
   command -v jq >/dev/null 2>&1 || return 0
 
@@ -167,6 +178,76 @@ main() {
       description: (if $description == "" then null else $description end)
     }' >> "$log_path" 2>/dev/null
 
+  return 0
+}
+
+# Minimal fallback when neither python nor jq is available: emit a bare
+# record (built with printf, no JSON tooling) so the log file still gets
+# created and the miss is visible.
+run_minimal() {
+  local input="$1"
+
+  # Extract agent_type / session_id / agent_id with plain sed/grep (best
+  # effort; no jq available). Bail out quietly if we can't find agent_type
+  # or it isn't a tierwork:* agent.
+  local agent_type session_id agent_id
+  agent_type="$(printf '%s' "$input" | grep -o '"agent_type"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+  [ -n "$agent_type" ] || return 0
+  case "$agent_type" in
+    tierwork:*) ;;
+    *) return 0 ;;
+  esac
+
+  session_id="$(printf '%s' "$input" | grep -o '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+  agent_id="$(printf '%s' "$input" | grep -o '"agent_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+
+  # Escape backslashes, double quotes, and newlines for safe embedding in a
+  # JSON string literal built by hand.
+  # Pure-bash escaping (no sed/awk/tr needed here): backslashes, double
+  # quotes, and literal newlines, in that order.
+  json_escape() {
+    local val="$1"
+    val="${val//\\/\\\\}"
+    val="${val//\"/\\\"}"
+    val="${val//$'\n'/\\n}"
+    printf '%s' "$val"
+  }
+
+  local ts_e session_id_e agent_id_e agent_type_e
+  ts_e="$(json_escape "$ts")"
+  session_id_e="$(json_escape "$session_id")"
+  agent_id_e="$(json_escape "$agent_id")"
+  agent_type_e="$(json_escape "$agent_type")"
+
+  local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
+
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","missing_tool":"python3+jq"}\n' \
+    "$ts_e" "$session_id_e" "$agent_id_e" "$agent_type_e" >> "$log_path" 2>/dev/null
+
+  return 0
+}
+
+main() {
+  local input
+  input="$(cat)" || return 0
+
+  local py
+  if py="$(find_python)"; then
+    # shellcheck disable=SC2086  # $py may be "py -3"; intentionally unquoted
+    printf '%s' "$input" | $py "$DIR/log-subagent.py" >/dev/null 2>&1
+    return 0
+  fi
+
+  if command -v jq >/dev/null 2>&1; then
+    run_jq "$input"
+    return 0
+  fi
+
+  run_minimal "$input"
   return 0
 }
 

@@ -134,7 +134,14 @@ run to a local log file.
   Codex so the hook picks it up).
 - The log is local only — nothing is sent anywhere by this hook.
 - The hook never blocks the session: it exits 0 and prints nothing even if
-  it cannot find a transcript, jq is missing, or the input is malformed.
+  it cannot find a transcript, python3/jq are missing, or the input is
+  malformed.
+- Requirements: python3 (preferred) or jq for the log hook and summary; with
+  neither, a minimal record with `missing_tool` is written. The Python
+  candidates are probed by actually running them (`python3`, then `python`,
+  then the Windows `py -3` launcher), not just checked with `command -v`,
+  because on Windows `python3`/`python` can be Microsoft Store stubs that
+  open the Store or exit non-zero instead of running Python.
 - Run `bench/report.py [path]` to print aggregate stats from the log
   (per-`agent_type` counts/models/tokens, bug-validator verdict
   distribution and `needs_primary_review` share, per-day counts). With no
@@ -181,6 +188,7 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
+- 0.5.1 (2026-09-04): log hook and session summary no longer require jq (python3 preferred, jq fallback, minimal record otherwise). Reported from a machine without jq where no log file was ever created.
 - 0.5.0 (2026-09-04): first tagged release. Dashboard export (JSON/CSV with labels), multi-source `--log` with de-dup, `bench/merge.py` for cross-machine collection; y-axis title fix.
 
 - 0.4.3 (2026-09-04): bench/dashboard.py — local (127.0.0.1) dashboard over reviews.jsonl with stat tiles, tokens by agent type, tokens over time, run table, and manual true/false-positive labels saved to ~/.tierwork/labels.jsonl. Rendering checked once with headless Chrome.
