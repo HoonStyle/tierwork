@@ -162,3 +162,18 @@ one observation, not a trend. Confound: the baseline session already had a
 user-level instruction to delegate to sonnet, so it was not a naive baseline.
 Follow-up: make the gate agent size the validation tier by diff size and
 stake instead of always using opus validators.
+
+### 2026-09-04, runs C and D (0.2.x), same task
+
+| run | plugin | sub-agents (model actually used) | cost (USD) | wall | findings |
+|---|---|---|---|---|---|
+| A | off | 2 × sonnet | 0.83 | 17 s | 2/2 |
+| B | 0.1.0 | hunter + 2 validators, all opus | 0.98 | 154 s | 2/2 |
+| C | 0.2.0 | hunter + 2 validators, all opus (gate skipped) | 0.96 | 158 s | 2/2 |
+| D | 0.2.1 | gate haiku, hunter sonnet, 2 validators sonnet | 0.73 | 175 s | 2/2 |
+
+Reading: in C the primary skipped gate because the policy did not make it
+mandatory; 0.2.1 fixed the wording and D followed the intended path. D is the
+cheapest run but the slowest; the extra wall time is the serial gate step plus
+one validator that took 30 turns. Still n=1 per configuration. Main-session
+opus tokens are part of every run's cost and are unaffected by the plugin.
