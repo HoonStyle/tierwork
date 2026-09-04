@@ -53,13 +53,17 @@ opus-tier `bug-hunter` with `lens: introduced-logic`.
   migration|schema|infra|deploy|ci|Dockerfile|\.github/workflows`; deleted or
   skipped tests; changed or removed signatures of EXISTING exported functions/classes (adding new exports, fields, or classes is NOT a stake signal; a feature diff always adds exports);
   concurrency primitives (`lock`, `mutex`, `thread`, `async`, `goroutine`).
-- Decision rule (initial heuristic, not yet measured):
-  - `small`: <= 3 files AND <= 60 changed lines AND no stake signal ->
-    `review_tier: sonnet`, `validation_tier: sonnet`
-  - `medium`: <= 10 files AND <= 400 changed lines AND no stake signal ->
-    `review_tier: opus`, `validation_tier: sonnet`
-  - otherwise, or any stake signal -> `review_tier: opus`,
-    `validation_tier: opus`
+- Decision rule (heuristic; tuned on runs A-F2, see README Measurement log):
+  - `size` by counts only: `small` <= 3 files AND <= 60 changed lines;
+    `medium` <= 10 files AND <= 400 changed lines; else `large`.
+  - `review_tier`: sonnet for `small` with no stake signal; opus otherwise
+    (any stake signal, or medium/large).
+  - `validation_tier`: sonnet for `small` and `medium`; opus only for
+    `large`. Stake signals do NOT raise validation_tier: validators
+    re-derive one finding each with deterministic checks first, and sonnet
+    validators matched opus on recall in measurements.
+- Sizing only: do NOT look for or report bugs; that is bug-hunter's job.
+  Listing a defect here wastes turns and biases the hunter.
 
 ## Output format
 
