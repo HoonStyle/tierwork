@@ -12,11 +12,7 @@ ships:
 - Four agent definitions for Claude Code (`gate`, `compliance-reviewer`,
   `bug-hunter`, `bug-validator`), modeled on the claude-code repo's
   `/code-review` command pattern (Haiku gate, Sonnet compliance, Opus bug
-  finder, Opus validator). The gate also sizes the diff and returns
-  `review_tier`/`validation_tier`, used as per-spawn model overrides for
-  bug-hunter/bug-validator; gate now runs in parallel with a
-  provisional-tier bug-hunter instead of strictly before it, and only an
-  opus second-pass hunter is launched when gate finds a stake signal.
+  finder, Opus validator).
 - Template Codex sub-agent `.toml` files with the same instructions, for
   manual copy into a project's `.codex/agents/` (Codex does not load plugin
   agent definitions automatically).
@@ -113,12 +109,6 @@ placeholder (see "Unverified items" below).
    (`codex plugin marketplace add HoonStyle/tierwork --ref main`) rather than
    a local path.
 
-## Bench
-
-`bench/` holds a small A/B harness for comparing review runs with the
-plugin enabled vs. disabled, using two fixture repos with known planted
-bugs. See `bench/README.md` for how to run a pair and read the results.
-
 ## Sources
 
 - code.claude.com/docs: plugins-reference, hooks, sub-agents,
@@ -137,63 +127,6 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
-- 0.3.4 (2026-09-04): stake signals raise review_tier only; validation_tier depends on size alone (opus only for large); gate does sizing only, no bug reports. Added `bench/` (run harness, session usage report, scorer, small/medium fixtures).
-- 0.3.3 (2026-09-04): stake signal "public interface change" narrowed to changed/removed signatures of existing exports; new exports are not a signal.
-
-- 0.3.2 (2026-09-04): policy: validators must wait for the gate result and never use the default model (run E launched opus validators although gate returned sonnet).
-
-- 0.3.1 (2026-09-04): fix: removed `hooks` from `.claude-plugin/plugin.json`. Claude Code auto-loads `hooks/hooks.json`; naming it again in the manifest makes the loader report "Duplicate hooks file detected" and mark the plugin failed to load (seen on 0.2.1 and 0.3.0, macOS and Windows). Reported by the user from another machine.
-
-- 0.3.0 (2026-09-04): bug-validator maxTurns 12 (run D had a 30-turn
-  validator), bug-hunter maxTurns 15; gate now runs in parallel with a
-  provisional-tier bug-hunter, and only a stake signal triggers an opus
-  second pass. Motivated by run D wall time (175 s).
-
-- 0.2.1 (2026-09-04): gate made mandatory first step in policy and in bug-hunter/bug-validator descriptions; Run C had skipped it.
-
 - 0.1.0 (2026-09-04): initial release. Cost rules added; bug-validator runs
   deterministic checks before LLM judgment (arXiv:2609.02246); deterministic
   checks are a hard gate; discovered-context reuse rule; versioning rule.
-- 0.2.0 (2026-09-04): gate sizes the diff and returns review_tier/validation_tier;
-  primary passes them as per-spawn model overrides. Thresholds: small <=3
-  files/<=60 lines -> sonnet+sonnet; medium <=10 files/<=400 lines ->
-  opus+sonnet; large or any stake signal -> opus+opus. Motivated by the n=1
-  measurement; thresholds unmeasured.
-
-## Measurement log
-
-### 2026-09-04, n=1, same task with plugin off vs on
-
-Task: review a 3-line uncommitted diff with two planted bugs (undefined name,
-string typo) in a scratch repo; prompt and main model (`opus`) identical;
-`claude -p --output-format json`. Both runs found both bugs.
-
-| | plugin off | plugin on |
-|---|---|---|
-| sub-agents | 2 × sonnet (general-purpose) | 1 × `tierwork:bug-hunter` + 2 × `tierwork:bug-validator` (opus) |
-| output tokens (all models) | 10,488 | 11,236 |
-| cache read tokens | 1,276,776 | 621,413 |
-| reported cost (USD) | 0.83 | 0.98 |
-| wall time | 17 s | 154 s |
-
-Reading: on a tiny, low-stake diff the opus validators cost more than the
-sonnet baseline and were ~9x slower, with no difference in findings. This is
-one observation, not a trend. Confound: the baseline session already had a
-user-level instruction to delegate to sonnet, so it was not a naive baseline.
-Follow-up: make the gate agent size the validation tier by diff size and
-stake instead of always using opus validators.
-
-### 2026-09-04, runs C and D (0.2.x), same task
-
-| run | plugin | sub-agents (model actually used) | cost (USD) | wall | findings |
-|---|---|---|---|---|---|
-| A | off | 2 × sonnet | 0.83 | 17 s | 2/2 |
-| B | 0.1.0 | hunter + 2 validators, all opus | 0.98 | 154 s | 2/2 |
-| C | 0.2.0 | hunter + 2 validators, all opus (gate skipped) | 0.96 | 158 s | 2/2 |
-| D | 0.2.1 | gate haiku, hunter sonnet, 2 validators sonnet | 0.73 | 175 s | 2/2 |
-
-Reading: in C the primary skipped gate because the policy did not make it
-mandatory; 0.2.1 fixed the wording and D followed the intended path. D is the
-cheapest run but the slowest; the extra wall time is the serial gate step plus
-one validator that took 30 turns. Still n=1 per configuration. Main-session
-opus tokens are part of every run's cost and are unaffected by the plugin.

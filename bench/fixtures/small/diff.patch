@@ -1,0 +1,19 @@
+diff --git a/tools/usage.py b/tools/usage.py
+index 1b17bf2..b170c3f 100644
+--- a/tools/usage.py
++++ b/tools/usage.py
+@@ -13,12 +13,13 @@ def totals(root):
+     for f in pathlib.Path(root).rglob("*.jsonl"):
+         for rec in load(f):
+             msg = rec.get("message") or {}
+-            if rec.get("type") != "assistant" or "usage" not in msg:
++            if rec.get("type") != "asistant" or "usage" not in msg:
+                 continue
+             u = msg["usage"]
+             acc[msg["model"]]["in"] += u.get("input_tokens", 0)
+             acc[msg["model"]]["out"] += u.get("output_tokens", 0)
+             acc[msg["model"]]["cache_read"] += u.get("cache_read_input_tokens", 0)
++            acc[msg["model"]]["cache_create"] += usage.get("cache_creation_input_tokens", 0)
+     return acc
+ 
+ if __name__ == "__main__":

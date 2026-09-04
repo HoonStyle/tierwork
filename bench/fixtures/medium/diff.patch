@@ -1,0 +1,360 @@
+diff --git a/inv/discounts.py b/inv/discounts.py
+index 2836220..2e7e8a1 100644
+--- a/inv/discounts.py
++++ b/inv/discounts.py
+@@ -1,4 +1,4 @@
+-"""Order-level discount rules."""
++"""Order-level and per-category discount rules."""
+ 
+ 
+ class DiscountRule:
+@@ -42,6 +42,39 @@ class ThresholdDiscount(DiscountRule):
+         return round(subtotal * (1 - self.percent / 100), 2)
+ 
+ 
++class CategoryDiscount:
++    """A percent discount that varies by item category.
++
++    Unlike DiscountRule subclasses, this is applied per line item rather
++    than to the order subtotal as a whole, since the rate depends on
++    each line's category.
++    """
++
++    def __init__(self, category_rates: dict, default_rate: float = 0.0):
++        for category, rate in category_rates.items():
++            if not (0 <= rate <= 100):
++                raise ValueError(f"rate for {category!r} must be between 0 and 100")
++        if not (0 <= default_rate <= 100):
++            raise ValueError("default_rate must be between 0 and 100")
++        self.category_rates = dict(category_rates)
++        self.default_rate = default_rate
++
++    def rate_for(self, category: str) -> float:
++        return self.category_rates.get(category, self.default_rate)
++
++    def apply_to_amount(self, category: str, amount: float) -> float:
++        rate = self.rate_for(category)
++        return round(amount * (1 - rate / 100), 2)
++
++    def categories(self):
++        return sorted(self.category_rates.keys())
++
++    def describe(self) -> str:
++        parts = [f"{cat}={rate}%" for cat, rate in sorted(self.category_rates.items())]
++        parts.append(f"default={self.default_rate}%")
++        return ", ".join(parts)
++
++
+ def best_discount(subtotal: float, rules) -> float:
+     """Apply every rule and return the lowest resulting total."""
+     if not rules:
+diff --git a/inv/io_csv.py b/inv/io_csv.py
+index f38070c..ac8fec2 100644
+--- a/inv/io_csv.py
++++ b/inv/io_csv.py
+@@ -6,7 +6,7 @@ from .models import Catalog, Item, LineItem
+ 
+ 
+ CATALOG_FIELDS = ["sku", "name", "category", "unit_price"]
+-ORDER_FIELDS = ["sku", "quantity"]
++ORDER_FIELDS = ["sku", "quantity", "discount_pct"]
+ 
+ 
+ def export_catalog(catalog: Catalog, path: str) -> None:
+@@ -46,7 +46,9 @@ def import_order_lines(path: str, catalog: Catalog):
+         for row in reader:
+             item = catalog.get(row["sku"])
+             quantity = int(row["quantity"])
+-            lines.append(LineItem(item=item, quantity=quantity))
++            line = LineItem(item=item, quantity=quantity)
++            line.discount_pct = float(row.get("discont_pct", 0) or 0)
++            lines.append(line)
+     return lines
+ 
+ 
+@@ -55,4 +57,45 @@ def export_order_lines(lines, path: str) -> None:
+         writer = csv.DictWriter(f, fieldnames=ORDER_FIELDS)
+         writer.writeheader()
+         for line in lines:
+-            writer.writerow({"sku": line.item.sku, "quantity": line.quantity})
++            writer.writerow(
++                {
++                    "sku": line.item.sku,
++                    "quantity": line.quantity,
++                    "discount_pct": getattr(line, "discount_pct", 0),
++                }
++            )
++
++
++CATEGORY_RATE_FIELDS = ["category", "percent"]
++
++
++def import_category_rates(path: str) -> dict:
++    """Read a two-column (category, percent) CSV into a rates dict.
++
++    This is the on-disk format for the per-category discount tables that
++    feed inv.discounts.CategoryDiscount.
++    """
++    rates = {}
++    with open(path, newline="") as f:
++        reader = csv.DictReader(f)
++        for row in reader:
++            rates[row["category"]] = float(row["percent"])
++    return rates
++
++
++def export_category_rates(rates: dict, path: str) -> None:
++    with open(path, "w", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=CATEGORY_RATE_FIELDS)
++        writer.writeheader()
++        for category in sorted(rates.keys()):
++            writer.writerow({"category": category, "percent": rates[category]})
++
++
++def export_order_summary(order, path: str) -> None:
++    """Write a one-row CSV snapshot of an order's summary() output."""
++    summary = order.summary()
++    fields = list(summary.keys())
++    with open(path, "w", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=fields)
++        writer.writeheader()
++        writer.writerow(summary)
+diff --git a/inv/models.py b/inv/models.py
+index 856d565..b427523 100644
+--- a/inv/models.py
++++ b/inv/models.py
+@@ -15,6 +15,10 @@ class Item:
+     def __post_init__(self):
+         if self.unit_price < 0:
+             raise ValueError("unit_price must not be negative")
++        if not self.category:
++            raise ValueError("category must not be empty")
++        if not self.sku:
++            raise ValueError("sku must not be empty")
+ 
+ 
+ @dataclass
+@@ -23,10 +27,13 @@ class LineItem:
+ 
+     item: Item
+     quantity: int
++    discount_pct: float = 0.0
+ 
+     def __post_init__(self):
+         if self.quantity <= 0:
+             raise ValueError("quantity must be positive")
++        if not (0 <= self.discount_pct <= 100):
++            raise ValueError("discount_pct must be between 0 and 100")
+ 
+     def subtotal(self) -> float:
+         return round(self.item.unit_price * self.quantity, 2)
+@@ -48,3 +55,9 @@ class Catalog:
+ 
+     def all_items(self):
+         return list(self.items.values())
++
++    def categories(self):
++        return sorted({item.category for item in self.items.values()})
++
++    def items_in_category(self, category: str):
++        return [item for item in self.items.values() if item.category == category]
+diff --git a/inv/order.py b/inv/order.py
+index d9be048..dcab0f8 100644
+--- a/inv/order.py
++++ b/inv/order.py
+@@ -1,21 +1,34 @@
+ """Order assembly and totals."""
+ 
+-from .discounts import DiscountRule
++from .discounts import DiscountRule, CategoryDiscount
++from .pricing import ROUND_NEAREST, round_amount
+ from .tax import TaxTable
+ 
+ 
+ class Order:
+-    """A collection of line items with discount and tax handling."""
++    """A collection of line items with discount and tax handling.
+ 
+-    def __init__(self, tax_table: TaxTable = None):
++    ``rounding`` selects how currency amounts are rounded to cents when
++    the order's subtotal and total are computed: "nearest" (the
++    historical behaviour), "up", or "down". See inv.pricing.round_amount.
++    """
++
++    def __init__(self, tax_table: TaxTable = None, rounding: str = ROUND_NEAREST):
+         self.lines = []
+         self.tax_table = tax_table or TaxTable()
++        self.rounding = rounding
+ 
+     def add_line(self, line_item) -> None:
+         self.lines.append(line_item)
+ 
+-    def subtotal(self) -> float:
+-        return round(sum(line.subtotal() for line in self.lines), 2)
++    def subtotal(self, category_discount: CategoryDiscount = None) -> float:
++        total = 0.0
++        for line in self.lines:
++            amount = line.subtotal()
++            if category_discount is not None:
++                amount = category_discount.apply_to_amount(line.item.category, amount)
++            total += amount
++        return round_amount(self.rounding, total)
+ 
+     def tax_total(self) -> float:
+         total = 0.0
+@@ -23,20 +36,34 @@ class Order:
+             total += self.tax_table.tax_for(line.item.category, line.subtotal())
+         return round(total, 2)
+ 
+-    def total(self, discount_rule: DiscountRule = None) -> float:
+-        subtotal = self.subtotal()
++    def total(self, discount_rule: DiscountRule = None, category_discount: CategoryDiscount = None) -> float:
++        subtotal = self.subtotal(category_discount=category_discount)
+         discounted = discount_rule.apply(subtotal) if discount_rule else subtotal
+-        discount_ratio = discounted / subtotal if subtotal else 1.0
++        base_subtotal = self.subtotal()
++        discount_ratio = discounted / base_subtotal if base_subtotal else 1.0
+         tax = round(self.tax_total() * discount_ratio, 2)
+-        return round(discounted + tax, 2)
++        return round_amount(discounted + tax, self.rounding)
+ 
+     def item_count(self) -> int:
+         return sum(line.quantity for line in self.lines)
+ 
+-    def summary(self) -> dict:
++    def lines_for_category(self, category: str):
++        return [line for line in self.lines if line.item.category == category]
++
++    def category_subtotals(self, category_discount: CategoryDiscount = None) -> dict:
++        totals = {}
++        for line in self.lines:
++            amount = line.subtotal()
++            if category_discount is not None:
++                amount = category_discount.apply_to_amount(line.item.category, amount)
++            totals[line.item.category] = totals.get(line.item.category, 0.0) + amount
++        return {category: round(amount, 2) for category, amount in totals.items()}
++
++    def summary(self, category_discount: CategoryDiscount = None) -> dict:
+         return {
+-            "subtotal": self.subtotal(),
++            "subtotal": self.subtotal(category_discount=category_discount),
+             "tax": self.tax_total(),
+             "item_count": self.item_count(),
+             "line_count": len(self.lines),
++            "rounding": self.rounding,
+         }
+diff --git a/inv/pricing.py b/inv/pricing.py
+index d6171c8..f23b282 100644
+--- a/inv/pricing.py
++++ b/inv/pricing.py
+@@ -1,7 +1,14 @@
+-"""Price rule helpers: bulk tiers and simple markdowns."""
++"""Price rule helpers: bulk tiers, markdowns, and rounding modes."""
+ 
++import math
+ from typing import List, Tuple
+ 
++ROUND_NEAREST = "nearest"
++ROUND_UP = "up"
++ROUND_DOWN = "down"
++
++ROUNDING_MODES = (ROUND_NEAREST, ROUND_UP, ROUND_DOWN)
++
+ 
+ class BulkTier:
+     """A quantity threshold and the unit price that applies at/above it."""
+@@ -19,21 +26,38 @@ class TieredPricing:
+ 
+     def unit_price_for(self, quantity: int, default_price: float) -> float:
+         applicable = default_price
+-        for tier in self.tiers:
++        tier_count = len(self.tiers)
++        for i in range(tier_count - 1):
++            tier = self.tiers[i]
+             if quantity >= tier.min_qty:
+                 applicable = tier.unit_price
+         return applicable
+ 
+-    def price_line(self, quantity: int, default_price: float) -> float:
++    def price_line(self, quantity: int, default_price: float, rounding: str = ROUND_NEAREST) -> float:
+         price = self.unit_price_for(quantity, default_price)
+-        return round(price * quantity, 2)
++        raw = price * quantity
++        return round_amount(raw, rounding)
++
+ 
++def round_amount(value: float, mode: str = ROUND_NEAREST) -> float:
++    """Round a currency amount to cents using the given rounding mode."""
++    if mode not in ROUNDING_MODES:
++        raise ValueError(f"unknown rounding mode: {mode}")
++    cents = value * 100
++    if mode == ROUND_UP:
++        cents = math.ceil(cents)
++    elif mode == ROUND_DOWN:
++        cents = math.floor(cents)
++    else:
++        cents = round(cents)
++    return cents / 100
+ 
+-def apply_markdown(price: float, markdown_pct: float) -> float:
++
++def apply_markdown(price: float, markdown_pct: float, rounding: str = ROUND_NEAREST) -> float:
+     """Reduce a price by a percentage (0-100)."""
+     if not (0 <= markdown_pct <= 100):
+         raise ValueError("markdown_pct must be between 0 and 100")
+-    return round(price * (1 - markdown_pct / 100), 2)
++    return round_amount(price * (1 - markdown_pct / 100), rounding)
+ 
+ 
+ def price_range(prices: List[float]) -> Tuple[float, float]:
+@@ -41,3 +65,17 @@ def price_range(prices: List[float]) -> Tuple[float, float]:
+     if not prices:
+         raise ValueError("prices must not be empty")
+     return (min(prices), max(prices))
++
++
++def average_price(prices: List[float]) -> float:
++    """Return the arithmetic mean of a list of prices, rounded to cents."""
++    if not prices:
++        raise ValueError("prices must not be empty")
++    return round(sum(prices) / len(prices), 2)
++
++
++def clamp_price(price: float, low: float, high: float) -> float:
++    """Clamp a price into the inclusive [low, high] range."""
++    if low > high:
++        raise ValueError("low must not be greater than high")
++    return max(low, min(price, high))
+diff --git a/inv/tax.py b/inv/tax.py
+index 7276bd3..91cfa70 100644
+--- a/inv/tax.py
++++ b/inv/tax.py
+@@ -11,12 +11,27 @@ class TaxTable:
+         self.default_rate = default_rate
+ 
+     def rate_for(self, category: str) -> float:
+-        return self.rates.get(category, self.default_rate)
++        if category in self.rates:
++            return self.rates[category]
++        return default_rate
+ 
+     def tax_for(self, category: str, amount: float) -> float:
+         rate = self.rate_for(category)
+         return round(amount * rate, 2)
+ 
++    def categories(self):
++        return sorted(self.rates.keys())
++
++    def set_rate(self, category: str, rate: float) -> None:
++        if rate < 0:
++            raise ValueError("rate must not be negative")
++        self.rates[category] = rate
++
++    def effective_rates(self) -> dict:
++        """Return a dict of every known category to its effective rate."""
++        result = {category: self.rate_for(category) for category in self.rates}
++        return result
++
+ 
+ def total_with_tax(amount: float, rate: float) -> float:
+     return round(amount * (1 + rate), 2)
