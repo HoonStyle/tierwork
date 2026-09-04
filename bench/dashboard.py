@@ -43,11 +43,11 @@ from pathlib import Path
 VALID_LABELS = {"true_positive", "false_positive", "unclear"}
 
 CSV_COLUMNS = [
-    "ts", "session_id", "agent_id", "agent_type", "spawn_model", "models",
-    "msgs", "tool_calls", "input_tokens", "output_tokens", "cache_read",
-    "cache_create", "verdict", "confidence", "needs_primary_review",
-    "proceed", "description", "cwd", "source", "label", "label_note",
-    "label_ts",
+    "ts", "session_id", "agent_id", "agent_type", "runtime", "spawn_model",
+    "models", "msgs", "tool_calls", "input_tokens", "output_tokens",
+    "cache_read", "cache_create", "verdict", "confidence",
+    "needs_primary_review", "proceed", "description", "cwd", "source",
+    "label", "label_note", "label_ts",
 ]
 
 # How often the SSE background thread checks log files for new bytes.
@@ -213,6 +213,12 @@ def merged_rows(log_paths, labels_path: Path):
     out = []
     for r in rows:
         row = dict(r)
+        # Records written before 0.7.0 (and the sh/jq minimal fallback path,
+        # in principle) predate the runtime tag; default to "claude" since
+        # that's the only runtime the log ever recorded before this field
+        # existed.
+        if not row.get("runtime"):
+            row["runtime"] = "claude"
         _apply_label(row, labels)
         out.append(row)
     return out
@@ -662,6 +668,9 @@ PAGE_HTML = r"""<!doctype html>
   .lbl-btns button:hover { color: var(--text); }
   .foot { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: center; }
   .empty-inline { color: var(--muted); padding: 48px 12px; text-align: center; font-size: 13px; }
+  .rt-badge { display: inline-block; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: .03em; padding: 1px 5px; border-radius: 3px; margin-right: 6px; border: 1px solid var(--line); color: var(--muted); vertical-align: middle; }
+  .rt-badge.claude { border-color: var(--opus); color: var(--opus); }
+  .rt-badge.codex { border-color: var(--ok); color: var(--ok); }
 
   @media (max-width: 1100px) { .kpis { grid-template-columns: repeat(3, 1fr); } .hero, .row2 { grid-template-columns: 1fr; } }
   @media (prefers-reduced-motion: reduce) { .pulse, .dot.enter, .dot.running, .feed li.enter { animation: none !important; } .bar div, .step .fill { transition: none !important; } }
@@ -677,6 +686,11 @@ PAGE_HTML = r"""<!doctype html>
       <button type="button" data-w="24h" class="on">24h</button>
       <button type="button" data-w="7d">7d</button>
       <button type="button" data-w="all">all</button>
+    </div>
+    <div class="seg" id="runtime-seg">
+      <button type="button" data-r="all" class="on">all</button>
+      <button type="button" data-r="claude">claude</button>
+      <button type="button" data-r="codex">codex</button>
     </div>
     <button class="btn" id="pause" type="button">Pause</button>
     <a class="dl" href="/api/export.json">Export JSON</a>
@@ -710,7 +724,7 @@ PAGE_HTML = r"""<!doctype html>
 
   <section class="panel">
     <header><h2>Runs</h2><span class="meta">newest first</span></header>
-    <div style="overflow-x:auto"><table class="runs"><thead><tr><th>time</th><th>agent</th><th>tier</th><th>msgs</th><th>tools</th><th>out tok</th><th>verdict</th><th>conf</th><th>primary?</th><th>task</th><th>label</th></tr></thead><tbody id="runs"></tbody></table></div>
+    <div style="overflow-x:auto"><table class="runs"><thead><tr><th>time</th><th>runtime</th><th>agent</th><th>tier</th><th>msgs</th><th>tools</th><th>out tok</th><th>verdict</th><th>conf</th><th>primary?</th><th>task</th><th>label</th></tr></thead><tbody id="runs"></tbody></table></div>
   </section>
   <div class="foot">Local, read-only view of tierwork's SubagentStop log (+ optional labels file). No data leaves this machine.</div>
 </div>
@@ -725,7 +739,7 @@ PAGE_HTML = r"""<!doctype html>
 
   // state.byKey: Map key -> row, used for de-dup/upsert of both the initial
   // /api/rows fetch and incoming SSE `rows` events.
-  var state = { byKey: new Map(), window: "24h", paused: false, bufferedKeys: [] };
+  var state = { byKey: new Map(), window: "24h", runtime: "all", paused: false, bufferedKeys: [] };
 
   function rowKey(r) { return (r.session_id || "") + " " + (r.agent_id || ""); }
   function num(v) {
@@ -821,6 +835,9 @@ PAGE_HTML = r"""<!doctype html>
 
   function windowRows() {
     var rows = allRows();
+    if (state.runtime !== "all") {
+      rows = rows.filter(function (r) { return (r.runtime || "claude") === state.runtime; });
+    }
     if (state.window === "all") return rows;
     var spanMs = state.window === "24h" ? 24 * 3600e3 : 7 * 24 * 3600e3;
     var cutoff = Date.now() - spanMs;
@@ -980,6 +997,11 @@ PAGE_HTML = r"""<!doctype html>
     });
   }
 
+  function runtimeBadge(r) {
+    var rt = r.runtime || "claude";
+    return '<span class="rt-badge ' + esc(rt) + '">' + esc(rt) + '</span>';
+  }
+
   // ---- Feed ----
   function renderFeed(newKeys) {
     var feed = $("#feed");
@@ -996,7 +1018,7 @@ PAGE_HTML = r"""<!doctype html>
         ? esc(r.description || "") + ' · <span class="running-elapsed" data-start="' + tsMillis(r) + '">running · 0s</span>'
         : esc(r.description || "") + " · " + new Date(tsMillis(r)).toLocaleTimeString();
       var tokHtml = running ? "" : fmt(num(r.output_tokens)) + "<br>tok";
-      return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what"><b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + verdictHtml + "<small>" + smallHtml + "</small></span><span class=\"tok num\">" + tokHtml + "</span></li>";
+      return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what">' + runtimeBadge(r) + '<b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + verdictHtml + "<small>" + smallHtml + "</small></span><span class=\"tok num\">" + tokHtml + "</span></li>";
     }).join("");
     updateRunningElapsed();
     $("#feed-n").textContent = rows.length + " events";
@@ -1090,6 +1112,7 @@ PAGE_HTML = r"""<!doctype html>
         : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—");
       return "<tr class=\"row\">" +
         '<td class="mono">' + new Date(tsMillis(r)).toLocaleTimeString() + "</td>" +
+        "<td>" + runtimeBadge(r) + "</td>" +
         "<td>" + esc((r.agent_type || "").replace("tierwork:", "")) + "</td>" +
         '<td><span class="tier ' + tier + '"><i></i>' + tier + "</span></td>" +
         '<td class="mono">' + esc(r.msgs) + "</td>" +
@@ -1151,6 +1174,16 @@ PAGE_HTML = r"""<!doctype html>
       document.querySelectorAll("#window-seg button").forEach(function (b) { b.classList.remove("on"); });
       btn.classList.add("on");
       state.window = btn.getAttribute("data-w");
+      renderAll();
+    });
+  });
+
+  // ---- runtime filter (all / claude / codex) ----
+  document.querySelectorAll("#runtime-seg button").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll("#runtime-seg button").forEach(function (b) { b.classList.remove("on"); });
+      btn.classList.add("on");
+      state.runtime = btn.getAttribute("data-r");
       renderAll();
     });
   });

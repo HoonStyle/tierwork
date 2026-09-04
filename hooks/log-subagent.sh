@@ -12,6 +12,12 @@
 # on Windows Git Bash, python) interpreter is available. If no Python is
 # found, it falls back to a jq implementation. If neither python nor jq is
 # available, it appends a minimal record so the log still gets created.
+#
+# Codex sub-agent runs (runtime: "codex") are only recognized by the Python
+# path (log-subagent.py). The jq/minimal fallbacks below only ever emit
+# runtime: "claude" records -- if python3 isn't available, Codex runs will
+# not appear tagged in the dashboard (they will simply not match the
+# tierwork:* Claude agent_type filter and be skipped).
 
 set -u
 
@@ -74,7 +80,8 @@ run_jq_start() {
       agent_type: $agent_type,
       status: "running",
       description: (if $description == "" then null else $description end),
-      cwd: (if $cwd == "" then null else $cwd end)
+      cwd: (if $cwd == "" then null else $cwd end),
+      runtime: "claude"
     }' >> "$log_path" 2>/dev/null
 
   return 0
@@ -236,7 +243,8 @@ run_jq() {
       needs_primary_review: (if $needs_primary_review == "" then null else $needs_primary_review end),
       proceed: (if $proceed == "" then null else $proceed end),
       cwd: (if $cwd == "" then null else $cwd end),
-      description: (if $description == "" then null else $description end)
+      description: (if $description == "" then null else $description end),
+      runtime: "claude"
     }' >> "$log_path" 2>/dev/null
 
   return 0
@@ -279,7 +287,7 @@ run_minimal_start() {
   local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
   mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
 
-  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"running"}\n' \
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"running","runtime":"claude"}\n' \
     "$ts_e" "$session_id_e" "$agent_id_e" "$agent_type_e" >> "$log_path" 2>/dev/null
 
   return 0
@@ -329,7 +337,7 @@ run_minimal() {
   local log_path="${TIERWORK_LOG:-$HOME/.tierwork/reviews.jsonl}"
   mkdir -p "$(dirname "$log_path")" 2>/dev/null || return 0
 
-  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"done","missing_tool":"python3+jq"}\n' \
+  printf '{"ts":"%s","session_id":"%s","agent_id":"%s","agent_type":"%s","status":"done","missing_tool":"python3+jq","runtime":"claude"}\n' \
     "$ts_e" "$session_id_e" "$agent_id_e" "$agent_type_e" >> "$log_path" 2>/dev/null
 
   return 0
@@ -338,6 +346,8 @@ run_minimal() {
 main() {
   local input
   input="$(cat)" || return 0
+  # Debug aid: TIERWORK_DEBUG_STDIN=<file> appends the raw hook input there.
+  [ -n "${TIERWORK_DEBUG_STDIN:-}" ] && printf '%s\n' "$input" >> "$TIERWORK_DEBUG_STDIN" 2>/dev/null
 
   local py
   if py="$(find_python)"; then

@@ -184,6 +184,90 @@ treated as possibly absent/missing without raising an error.
   `bench/README.md`'s "Dashboard" section for routes and the full
   cross-machine workflow.
 
+### Codex
+
+**Status (0.7.0, live-verified once on 2026-09-04, Codex CLI 0.153.0):**
+- Codex only runs plugin hooks after the user trusts them. Docs: "Before a
+  non-managed hook can run, Codex requires you to review and trust the exact
+  hook definition"; use `/hooks` in the Codex TUI to trust them. In a
+  non-interactive `codex exec` without trust the hooks were silently skipped
+  (observed). With `--dangerously-bypass-hook-trust` all three hooks fired:
+  SessionStart injected the policy, SubagentStart and SubagentStop arrived
+  with `session_id`, `turn_id`, `agent_id`, `agent_type`, `transcript_path`,
+  `agent_transcript_path` (stop only), `model`, `cwd`, `permission_mode`.
+- Codex sub-agents spawned through its collab tool arrive with
+  `agent_type: "default"`; the sub-agent rollout's `session_meta` carries
+  `agent_nickname` (e.g. "Curie") and `agent_role`/`agent_path` (null when
+  spawned ad hoc). So the Claude-side `tierwork:*` filter cannot apply:
+  Codex records are written for every sub-agent, labeled `tierwork:<name>`
+  when the role/path matches, otherwise `codex:<role|nickname|type>`, with
+  `runtime: "codex"`. Tokens and model come from the rollout
+  (`token_usage_record.thread_token_usage`, `turn_context.model`).
+- Refresh the Codex-side copy after upgrading: `codex plugin remove
+  tierwork@tierwork && codex plugin add tierwork@tierwork` (the cached copy
+  stayed at 0.1.0 until this was done).
+- NOT VERIFIED: whether a sub-agent spawned from a project `.codex/agents/*.toml`
+  template carries `agent_role`/`agent_path` that maps to a tierwork name.
+
+Codex's hooks doc (developers.openai.com/codex/hooks, 308-redirects to
+learn.chatgpt.com/docs/hooks, fetched 2026-09-04) documents `SubagentStart`
+and `SubagentStop` as supported events with a shape close to Claude's:
+common fields `session_id`, `cwd`, `hook_event_name`, `transcript_path`,
+`model`; `SubagentStart` adds `turn_id`, `agent_id`, `agent_type`,
+`permission_mode`; `SubagentStop` adds `turn_id`, `agent_id`, `agent_type`,
+`agent_transcript_path`, `stop_hook_active`, `last_assistant_message`. The
+doc also says installed plugins load hooks "through their plugin manifest
+or a default `hooks/hooks.json` file" — the same file this plugin already
+ships for Claude — so `hooks/hooks.json` was left unchanged; no
+Codex-specific hook file was added.
+
+`hooks/log-subagent.py` detects a Codex hook call by the presence of the
+`agent_transcript_path` key (SubagentStop) or a top-level `model` key
+(SubagentStart) in the hook's stdin JSON — neither key is ever present in
+Claude's hook input. **This detection heuristic itself is unverified**
+against a real Codex hook firing. For a Codex `SubagentStop`, the script
+reads the sub-agent's own rollout JSONL — from `agent_transcript_path` if
+given, else by scanning `~/.codex/sessions/**/rollout-*.jsonl` for a
+filename containing the `agent_id` (best-effort fallback, also unverified
+live) — and aggregates it using the schema below into the exact same
+record shape the Claude path writes, tagged `"runtime": "codex"` (Claude
+records now carry `"runtime": "claude"`; the jq/minimal shell fallbacks in
+`hooks/log-subagent.sh` only ever emit `runtime: "claude"` — Codex support
+requires python3). `agent_type` filtering stays `tierwork:*` for parity
+with the Claude path, on the (unverified) assumption Codex populates
+`agent_type` for its sub-agents analogously.
+
+Rollout schema, confirmed by reading 135 real local
+`~/.codex/sessions/**/rollout-*.jsonl` files with `jq` (no written spec
+found for this): each line is `{"type": ..., "payload": {...}}`. Types seen:
+`response_item` (payload `{"type":"message","role":"assistant"|"user"|
+"developer","content":[{"type":"output_text","text":...}]}`, also
+`"reasoning"`, `"custom_tool_call"`, `"custom_tool_call_output"`),
+`event_msg` (payload `{"type":"task_complete","last_assistant_message":...}`,
+also `"task_started"`, `"item_completed"`, `"token_count"`), `turn_context`
+(payload `{"model": "gpt-5.6-sol", ...}` — model lives here, not on
+`response_item`), `world_state`, `compacted`, `session_meta` (payload
+`{"id","session_id","parent_thread_id","thread_source":"user"|"subagent"|
+"guardian_review","source": "exec"|"vscode"|{"subagent":{"thread_spawn":
+{"parent_thread_id","depth","agent_path","agent_nickname","agent_role"}}}|
+{"subagent":{"other":"guardian"}},"cwd","timestamp"}` — this is how a
+sub-agent's rollout file links back to its parent thread and carries its
+nickname), and `token_usage_record` (payload `{"thread_id","turn_id",
+"usage","turn_token_usage","thread_token_usage":{"input_tokens",
+"cached_input_tokens","cache_write_input_tokens","output_tokens",
+"reasoning_output_tokens","total_tokens"}}`). The parser takes the **last**
+`token_usage_record`'s `thread_token_usage` as the run total, on the
+assumption (unverified against a multi-turn thread — every sampled file
+had only one) that it is cumulative per thread rather than per-turn, so
+summing every record would double-count.
+
+`bench/dashboard.py` shows `runtime` as a small badge (`claude`/`codex`)
+next to each row in the live feed and the runs table, and adds an
+`all`/`claude`/`codex` filter next to the time-window buttons. `/api/rows`,
+`/api/export.json`, and `/api/export.csv` all include the `runtime` field;
+rows written before 0.7.0 default to `runtime: "claude"` in the merge step
+since that was the only runtime the log ever recorded.
+
 ## Bench
 
 `bench/` holds a small A/B harness for comparing review runs with the
@@ -210,6 +294,20 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
 ## Changelog
+
+- 0.7.0 (2026-09-04): data log works under Codex too. `hooks/log-subagent.py`
+  detects a Codex hook call (presence of `agent_transcript_path` or a
+  top-level `model` key, absent from Claude's hook input) and, on
+  `SubagentStop`, parses the sub-agent's own Codex rollout JSONL (from
+  `agent_transcript_path`, else a best-effort scan of
+  `~/.codex/sessions/**/rollout-*.jsonl` by `agent_id`) into the same record
+  shape as the Claude path. Every record now carries `"runtime": "claude"`
+  or `"runtime": "codex"`; `bench/dashboard.py` shows it as a badge in the
+  feed and runs table, adds an all/claude/codex filter, and includes it in
+  both exports. Offline-verified against real local rollout files and a
+  simulated Codex hook stdin; live Codex hook firing is NOT verified (no
+  Codex credits at implementation time) — see the new "Codex" subsection
+  under "Data log".
 
 - 0.6.2 (2026-09-04): running rows are excluded from the tier cost table and bar (they carry no tokens or model yet).
 
