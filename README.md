@@ -129,6 +129,8 @@ placeholder (see "Unverified items" below).
 
 ## Changelog
 
+- 0.2.1 (2026-09-04): gate made mandatory first step in policy and in bug-hunter/bug-validator descriptions; Run C had skipped it.
+
 - 0.1.0 (2026-09-04): initial release. Cost rules added; bug-validator runs
   deterministic checks before LLM judgment (arXiv:2609.02246); deterministic
   checks are a hard gate; discovered-context reuse rule; versioning rule.
