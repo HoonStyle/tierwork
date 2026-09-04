@@ -103,23 +103,25 @@ guideline standardizes on. [claude-code code-review command]
    the issue: Opus for bugs and logic issues, Sonnet for CLAUDE.md violations.
 6. Keep only validated issues, then report.
 
-tierwork variant: gate no longer runs strictly before the hunter. The primary
-sizes the diff itself (`git diff --stat`, files/lines only) and picks a
-provisional hunter tier by size alone (sonnet for <=3 files and <=60 lines,
-opus otherwise), then launches `tierwork:gate` (haiku) and a provisional-tier
-`tierwork:bug-hunter` (`lens: diff-only`) in parallel in the same turn. Gate's
-`review_tier`/`validation_tier` also weighs stake signals (auth, payments,
-migrations, CI, concurrency, public interfaces); if `review_tier` comes back
-higher than the provisional tier, that stake signal triggers a second
-`bug-hunter` on opus with `lens: introduced-logic` — otherwise no second pass.
-Validators (`tierwork:bug-validator`, one per finding, `model:
-<validation_tier>`) only start once hunter findings exist, so gate's latency
-is hidden behind the hunter instead of serialized in front of it. Rationale:
-a first measurement (README, Measurement log) showed opus validators on a
-3-line diff cost more and ran ~9x slower than sonnet with identical findings,
-and run D's serial gate-then-hunter order added measurable wall time (175 s)
-even after tiering brought cost down; n=1 per configuration, thresholds are
-initial heuristics to be tuned against further measurements.
+tierwork variant (0.4.0): gate (haiku) runs first for eligibility and
+CLAUDE.md paths only — it does not size the diff or return a tier. Once gate
+proceeds, the primary launches two `tierwork:bug-hunter` instances in
+parallel, both opus, one per lens (`lens: diff-only`, `lens:
+introduced-logic`), plus `tierwork:compliance-reviewer` (sonnet) when gate
+returned any CLAUDE.md path. Each bug finding gets its own
+`tierwork:bug-validator` (opus); compliance findings are validated by a
+sonnet compliance-reviewer instance, not by opus — this matches the
+claude-code `/code-review` tiering by task type, not by diff size. The
+primary does not re-open files for a finding a validator returned as
+confirmed with confidence >= 70; it reports that finding from the
+validator's file:line and evidence verbatim, and reads code itself only for
+findings the validator marked `needs_primary_review: yes`.
+
+Measured (n=1 per configuration, README Measurement log): on small diffs the
+primary's re-review did not add true positives, and on medium diffs the
+primary's output tokens equalled the sub-agents' combined output. Gate-based
+diff sizing was tried in 0.2-0.3 and removed: no precedent in the official
+plugins, and misclassification cost more than it saved.
 
 Reviewers are told to flag only high-signal issues: code that will not compile
 or parse, code that will definitely produce wrong results, or an unambiguous

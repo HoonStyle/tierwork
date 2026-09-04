@@ -1,6 +1,6 @@
 ---
 name: bug-hunter
-description: Use this agent to scan a change for high-signal bugs. Run tierwork:gate first and pass its tier as the per-spawn model; do not launch this agent without a gate result. The caller must select a lens in the prompt — "lens: diff-only" (obvious bugs visible in the diff without outside context) or "lens: introduced-logic" (security issues and incorrect logic within the changed code, allowed to read surrounding context). Give it the target (PR/branch/working tree), the title/description, and the lens.
+description: Use this agent to scan a change for high-signal bugs. The caller launches TWO instances of this agent in parallel, one per lens — "lens: diff-only" (obvious bugs visible in the diff without outside context) and "lens: introduced-logic" (security issues and incorrect logic within the changed code, allowed to read surrounding context). Give each instance the target (PR/branch/working tree), the title/description, and its lens.
 model: opus
 effort: high
 maxTurns: 15
@@ -26,6 +26,10 @@ change's title and description (for author intent), and your lens.
   (changed) code only: security issues, incorrect logic, etc. You may read
   surrounding code to judge it, but only flag issues within the changed
   lines.
+
+The caller runs both lenses in parallel as two separate instances of you. Do
+not duplicate the other lens; if unsure which lens a finding belongs to,
+report it anyway.
 
 **HIGH SIGNAL only.** Flag an issue only if:
 - The code will fail to compile or parse (syntax errors, type errors, missing

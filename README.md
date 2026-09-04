@@ -11,12 +11,12 @@ ships:
   hook.
 - Four agent definitions for Claude Code (`gate`, `compliance-reviewer`,
   `bug-hunter`, `bug-validator`), modeled on the claude-code repo's
-  `/code-review` command pattern (Haiku gate, Sonnet compliance, Opus bug
-  finder, Opus validator). The gate also sizes the diff and returns
-  `review_tier`/`validation_tier`, used as per-spawn model overrides for
-  bug-hunter/bug-validator; gate now runs in parallel with a
-  provisional-tier bug-hunter instead of strictly before it, and only an
-  opus second-pass hunter is launched when gate finds a stake signal.
+  `/code-review` command pattern: Haiku gate (eligibility + CLAUDE.md paths
+  only), two parallel Opus bug-hunters with different lenses (`diff-only`,
+  `introduced-logic`), a Sonnet compliance-reviewer, and per-finding
+  validators (Opus for bugs, Sonnet for compliance). Tiering follows task
+  type, not diff size — the gate does not size the diff or pick a model
+  tier.
 - Template Codex sub-agent `.toml` files with the same instructions, for
   manual copy into a project's `.codex/agents/` (Codex does not load plugin
   agent definitions automatically).
@@ -124,7 +124,10 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 - code.claude.com/docs: plugins-reference, hooks, sub-agents,
   plugin-marketplaces.
 - developers.openai.com/codex: plugins, hooks, subagents, skills.
-- anthropics/claude-code: `plugins/code-review/commands/code-review.md`.
+- anthropics/claude-code: `plugins/code-review/commands/code-review.md`
+  line 55: "Use Opus subagents for bugs and logic issues, and sonnet agents
+  for CLAUDE.md violations."; CHANGELOG: "Improved `/code-review` workflow:
+  merged five cleanup finders into one, cutting token usage by roughly 25%".
 - arXiv:2609.02246, "LLM-as-a-Judge Is Not an Oracle: Why Self-Improving
   Agents Need Deterministic Guardrails".
 - arXiv:2609.02248, "From Prompting to Engineering: A Research Agenda for
@@ -137,7 +140,15 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
-- 0.3.4 (2026-09-04): stake signals raise review_tier only; validation_tier depends on size alone (opus only for large); gate does sizing only, no bug reports. Added `bench/` (run harness, session usage report, scorer, small/medium fixtures).
+- 0.4.0 (2026-09-04): removed gate diff sizing and per-spawn tiers; two opus
+  bug-hunters (diff-only, introduced-logic) in parallel; validators opus for
+  bugs, sonnet for compliance (as in claude-code /code-review); primary
+  integration rules stop re-review of confirmed findings. Rationale:
+  official plugins tier by task type only; measured primary re-review added
+  no true positives; bench/ harness added.
+- 0.3.4 (unreleased): validation_tier by size — abandoned before release.
+  Added `bench/` (run harness, session usage report, scorer, small/medium
+  fixtures) in the same work; kept in 0.4.0.
 - 0.3.3 (2026-09-04): stake signal "public interface change" narrowed to changed/removed signatures of existing exports; new exports are not a signal.
 
 - 0.3.2 (2026-09-04): policy: validators must wait for the gate result and never use the default model (run E launched opus validators although gate returned sonnet).

@@ -20,6 +20,10 @@ change's title and description (for author intent), and your lens.
   (changed) code only: security issues, incorrect logic, etc. You may read
   surrounding code to judge it, but only flag issues within the changed lines.
 
+The caller runs both lenses in parallel as two separate instances of you. Do
+not duplicate the other lens; if unsure which lens a finding belongs to,
+report it anyway.
+
 HIGH SIGNAL only. Flag an issue only if:
 - The code will fail to compile or parse (syntax errors, type errors, missing
   imports, unresolved references), or

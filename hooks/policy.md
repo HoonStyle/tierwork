@@ -31,19 +31,20 @@
   confidence score or level, and explicit gaps/blockers.
 - Deterministic checks gate LLM verdicts, never the reverse.
 
-Shipped agents (Claude only, scoped names). Code-review order, every review
-including tiny diffs:
-1. Primary runs `git diff --stat` (or `gh pr diff --stat <PR>`), picks a
-   provisional hunter tier by size alone: <=3 files/<=60 lines -> sonnet, else opus.
-2. Same turn: launch `tierwork:gate` (haiku) AND `tierwork:bug-hunter`
-   (`model: <provisional tier>`, `lens: diff-only`) in parallel.
-3. If gate's `review_tier` > provisional tier (stake signal found), launch a
-   second `bug-hunter` on opus with `lens: introduced-logic`; else skip it.
-4. `tierwork:bug-validator`, one per finding, `model: <validation_tier from
-   gate>`. WAIT for the gate result before launching any validator; never
-   launch a validator with the default model. Gate latency is hidden behind
-   the hunter, so this wait is normally zero.
-- `tierwork:compliance-reviewer` (sonnet) — CLAUDE.md compliance audit.
+Code-review order (follows claude-code /code-review; tiers by task type,
+not by diff size):
+1. `tierwork:gate` (haiku): eligibility + CLAUDE.md paths. Stop if not eligible.
+2. In parallel: `tierwork:bug-hunter` x2 (opus; `lens: diff-only` and
+   `lens: introduced-logic`), plus `tierwork:compliance-reviewer` (sonnet)
+   when gate returned any CLAUDE.md path.
+3. One `tierwork:bug-validator` per bug finding (opus). Compliance findings
+   are validated by a sonnet compliance-reviewer instance, not by opus.
+4. Primary integration rules: do not re-open files for findings a validator
+   returned as confirmed with confidence >= 70; report them from the
+   validator's file:line and evidence verbatim. Read code yourself only for
+   findings marked `needs_primary_review: yes`. Final report: at most three
+   lines per finding. Recall comes from the two hunter lenses, not from the
+   primary re-reading the diff.
 
 Before designing any fan-out of 3+ sub-agents, load the `subagent-delegation`
 skill for the full guideline.

@@ -1,6 +1,6 @@
 ---
 name: bug-validator
-description: Use this agent to validate exactly one finding from bug-hunter or compliance-reviewer before it is reported or acted on. Run tierwork:gate first and pass its tier as the per-spawn model; do not launch this agent without a gate result. Give it the change's title/description and the single finding (file:line, description, reason tag). It re-derives the verdict from the cited code and never trusts the finder's description at face value.
+description: Use this agent to validate exactly one bug finding from bug-hunter before it is reported or acted on. Give it the change's title/description and the single finding (file:line, description, reason tag). It re-derives the verdict from the cited code and never trusts the finder's description at face value.
 model: opus
 effort: high
 maxTurns: 12
@@ -82,4 +82,8 @@ evidence: file:line
 deterministic_checks: <each command run and its outcome, or "none">
 reasoning: <one paragraph, from the code you read, not the finder's description>
 confidence: <0-100, capped at 70 when deterministic_checks is none>
+needs_primary_review: yes|no
 ```
+
+`needs_primary_review` is `yes` only when the verdict is inconclusive or
+`confidence` is below 70; otherwise `no`.
