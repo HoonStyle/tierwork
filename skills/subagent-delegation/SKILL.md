@@ -103,14 +103,23 @@ guideline standardizes on. [claude-code code-review command]
    the issue: Opus for bugs and logic issues, Sonnet for CLAUDE.md violations.
 6. Keep only validated issues, then report.
 
-tierwork variant: step 1 also sizes the diff and returns `review_tier` /
-`validation_tier` (sonnet for small, low-stake diffs; opus when the diff is
-large or touches auth, payments, migrations, CI, concurrency, or public
-interfaces). The primary passes those as per-spawn `model` overrides.
-Rationale: a first measurement (README, Measurement log) showed opus
-validators on a 3-line diff cost more and ran ~9x slower than sonnet with
-identical findings; n=1, thresholds are initial heuristics to be tuned
-against further measurements.
+tierwork variant: gate no longer runs strictly before the hunter. The primary
+sizes the diff itself (`git diff --stat`, files/lines only) and picks a
+provisional hunter tier by size alone (sonnet for <=3 files and <=60 lines,
+opus otherwise), then launches `tierwork:gate` (haiku) and a provisional-tier
+`tierwork:bug-hunter` (`lens: diff-only`) in parallel in the same turn. Gate's
+`review_tier`/`validation_tier` also weighs stake signals (auth, payments,
+migrations, CI, concurrency, public interfaces); if `review_tier` comes back
+higher than the provisional tier, that stake signal triggers a second
+`bug-hunter` on opus with `lens: introduced-logic` — otherwise no second pass.
+Validators (`tierwork:bug-validator`, one per finding, `model:
+<validation_tier>`) only start once hunter findings exist, so gate's latency
+is hidden behind the hunter instead of serialized in front of it. Rationale:
+a first measurement (README, Measurement log) showed opus validators on a
+3-line diff cost more and ran ~9x slower than sonnet with identical findings,
+and run D's serial gate-then-hunter order added measurable wall time (175 s)
+even after tiering brought cost down; n=1 per configuration, thresholds are
+initial heuristics to be tuned against further measurements.
 
 Reviewers are told to flag only high-signal issues: code that will not compile
 or parse, code that will definitely produce wrong results, or an unambiguous

@@ -3,11 +3,14 @@ name: bug-hunter
 description: Use this agent to scan a change for high-signal bugs. Run tierwork:gate first and pass its tier as the per-spawn model; do not launch this agent without a gate result. The caller must select a lens in the prompt — "lens: diff-only" (obvious bugs visible in the diff without outside context) or "lens: introduced-logic" (security issues and incorrect logic within the changed code, allowed to read surrounding context). Give it the target (PR/branch/working tree), the title/description, and the lens.
 model: opus
 effort: high
+maxTurns: 15
 tools: Bash, Read, Grep, Glob
 ---
 
 You are a bug hunter. You use exactly one lens per run, as specified in your
 prompt: `lens: diff-only` or `lens: introduced-logic`.
+
+Budget: 15 turns; report what you have before the limit.
 
 **Agent assumptions:** Tools work; do not make exploratory calls. Every call needs a purpose.
 

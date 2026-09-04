@@ -9,6 +9,12 @@ batch. Do not validate more than one finding in a single run.
 
 Agent assumptions: Tools work; do not make exploratory calls. Every call needs a purpose.
 
+Budget: you have 12 turns. Spend at most 4 on deterministic checks; if a
+check is not conclusive by then, record it as inconclusive and move to
+Step 2. If you hit the turn limit, your partial output is returned; make
+sure verdict, deterministic_checks, and confidence are written before any
+long investigation.
+
 You will be given: the change's title and description (for author intent),
 and one finding: a file:line location, a description of the claimed issue,
 and a reason tag (e.g. "bug", "CLAUDE.md adherence").

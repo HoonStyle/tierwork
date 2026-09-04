@@ -1,6 +1,6 @@
 ---
 name: gate
-description: Use this agent first, before any other review work, to decide whether a change is even worth reviewing and to list the relevant CLAUDE.md files. Input is a PR number, a branch name, or "working tree" for the current uncommitted diff. It checks eligibility (closed, draft, trivial, already reviewed) and returns file paths only — never file contents.
+description: Use this agent to decide whether a change is even worth reviewing and to list the relevant CLAUDE.md files. It normally runs in parallel with a provisional-tier tierwork:bug-hunter, not before it — the primary picks the hunter's provisional model tier itself from `git diff --stat`, then launches gate and that hunter in the same turn. Input is a PR number, a branch name, or "working tree" for the current uncommitted diff. It checks eligibility (closed, draft, trivial, already reviewed) and returns file paths only — never file contents.
 model: haiku
 effort: low
 maxTurns: 8
@@ -38,6 +38,13 @@ locate CLAUDE.md files along those paths and upward. Do not read CLAUDE.md
 contents — path listing only.
 
 ## Step 2: size the review
+
+Note: by the time this step runs, the primary has already launched a
+provisional-tier `tierwork:bug-hunter` in parallel with you, sized from
+`git diff --stat` alone. Your `review_tier` here is the more informed
+verdict (it also checks stake signals) — if it comes out higher than the
+provisional tier the primary used, that is the signal to launch a second,
+opus-tier `bug-hunter` with `lens: introduced-logic`.
 
 - Run `git diff --stat` (or `gh pr diff --stat <PR>` for a PR target) and
   count changed files and changed lines (insertions + deletions).

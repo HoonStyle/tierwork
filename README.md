@@ -14,7 +14,9 @@ ships:
   `/code-review` command pattern (Haiku gate, Sonnet compliance, Opus bug
   finder, Opus validator). The gate also sizes the diff and returns
   `review_tier`/`validation_tier`, used as per-spawn model overrides for
-  bug-hunter/bug-validator.
+  bug-hunter/bug-validator; gate now runs in parallel with a
+  provisional-tier bug-hunter instead of strictly before it, and only an
+  opus second-pass hunter is launched when gate finds a stake signal.
 - Template Codex sub-agent `.toml` files with the same instructions, for
   manual copy into a project's `.codex/agents/` (Codex does not load plugin
   agent definitions automatically).
@@ -128,6 +130,11 @@ placeholder (see "Unverified items" below).
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
 ## Changelog
+
+- 0.3.0 (2026-09-04): bug-validator maxTurns 12 (run D had a 30-turn
+  validator), bug-hunter maxTurns 15; gate now runs in parallel with a
+  provisional-tier bug-hunter, and only a stake signal triggers an opus
+  second pass. Motivated by run D wall time (175 s).
 
 - 0.2.1 (2026-09-04): gate made mandatory first step in policy and in bug-hunter/bug-validator descriptions; Run C had skipped it.
 

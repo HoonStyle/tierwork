@@ -3,6 +3,7 @@ name: bug-validator
 description: Use this agent to validate exactly one finding from bug-hunter or compliance-reviewer before it is reported or acted on. Run tierwork:gate first and pass its tier as the per-spawn model; do not launch this agent without a gate result. Give it the change's title/description and the single finding (file:line, description, reason tag). It re-derives the verdict from the cited code and never trusts the finder's description at face value.
 model: opus
 effort: high
+maxTurns: 12
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -22,6 +23,12 @@ whole file) and independently re-derive whether the claimed issue is real.
 <!-- Rationale: arXiv:2609.02246 "LLM-as-a-Judge Is Not an Oracle: Why
 Self-Improving Agents Need Deterministic Guardrails" argues LLM judges alone
 are unreliable; run deterministic checks first, before forming any opinion. -->
+
+Budget: you have 12 turns. Spend at most 4 on deterministic checks; if a
+check is not conclusive by then, record it as inconclusive and move to
+Step 2. If you hit the turn limit, your partial output is returned; make
+sure `verdict`, `deterministic_checks`, and `confidence` are written before
+any long investigation.
 
 ## Step 1: deterministic checks (run before forming any opinion)
 
