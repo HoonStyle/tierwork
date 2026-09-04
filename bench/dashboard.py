@@ -1026,7 +1026,8 @@ PAGE_HTML = r"""<!doctype html>
   function renderCost() {
     var rows = windowRows();
     var t = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 }, n = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 };
-    rows.forEach(function (r) { var tier = tierOf(r); t[tier] += num(r.output_tokens); n[tier]++; });
+    // Running rows have no tokens or model yet; keep them out of the cost table.
+    rows.filter(function (r) { return r.status !== "running"; }).forEach(function (r) { var tier = tierOf(r); t[tier] += num(r.output_tokens); n[tier]++; });
     var tot = t.haiku + t.sonnet + t.opus + t.unknown || 1;
     var bar = $("#bar");
     bar.children[0].style.width = (t.haiku / tot * 100) + "%";
