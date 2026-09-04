@@ -192,6 +192,8 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
 
 ## Changelog
 
+- 0.6.0 (2026-09-04): dashboard redesigned as a mission-control view: swimlanes per agent lane (tier = color + shape, size = output tokens), live feed, KPI strip with sparklines, tier cost bar, verdict funnel, runs table with labels; Server-Sent Events push appended rows with a 10 s polling fallback; 24h/7d/all windows with a window-fixed time axis; light/dark tokens; reduced-motion respected. Plugin hooks and agents unchanged.
+
 - 0.5.1 (2026-09-04): log hook and session summary no longer require jq (python3 preferred, jq fallback, minimal record otherwise). Reported from a machine without jq where no log file was ever created.
 - 0.5.0 (2026-09-04): first tagged release. Dashboard export (JSON/CSV with labels), multi-source `--log` with de-dup, `bench/merge.py` for cross-machine collection; y-axis title fix.
 

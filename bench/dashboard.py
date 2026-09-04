@@ -826,8 +826,17 @@ PAGE_HTML = r"""<!doctype html>
     var laneShort = lanes.map(function (l) { return l === "other" ? "other" : LANE_SHORT[l]; });
 
     var L = 120, R = 1030, T = 18, LH = 300 / lanes.length, W = R - L;
-    var minT = Math.min.apply(null, rows.map(function (r) { return tsMillis(r); }));
-    var maxT = Math.max.apply(null, rows.map(function (r) { return tsMillis(r); }));
+    // Axis follows the selected window (not the data extent) so ticks are
+    // stable and "now" sits at the right edge; "all" pads the data range.
+    var nowT = Date.now();
+    var minT, maxT;
+    if (state.window === "24h") { minT = nowT - 24 * 3600e3; maxT = nowT; }
+    else if (state.window === "7d") { minT = nowT - 7 * 24 * 3600e3; maxT = nowT; }
+    else {
+      minT = Math.min.apply(null, rows.map(function (r) { return tsMillis(r); }));
+      maxT = nowT;
+      if (!(maxT - minT > 3600e3)) minT = maxT - 3600e3;
+    }
     var span = Math.max(maxT - minT, 1);
     svg.setAttribute("viewBox", "0 0 1040 " + (T + lanes.length * LH + 24));
     svg.setAttribute("height", (T + lanes.length * LH + 24));
@@ -842,11 +851,17 @@ PAGE_HTML = r"""<!doctype html>
 
     var tick = tickIntervalMs(minT, maxT);
     var axisY = T + lanes.length * LH + 6;
-    for (var tt = minT; tt <= maxT + 1; tt += tick) {
+    // Ticks count back from "now" so the last tick is always the right edge.
+    var nTicks = Math.floor(span / tick);
+    for (var k = nTicks; k >= 0; k--) {
+      var tt = maxT - k * tick;
       var x = L + W * (tt - minT) / span;
       var d = new Date(tt);
-      var label = el("text", { x: x, y: axisY, class: "axis-t", "text-anchor": "middle" });
-      label.textContent = state.window === "24h" ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : d.toLocaleDateString([], { month: "short", day: "numeric" });
+      var label = el("text", { x: x, y: axisY, class: "axis-t", "text-anchor": k === 0 ? "end" : (k === nTicks ? "start" : "middle") });
+      if (k === 0) label.textContent = "now";
+      else if (state.window === "24h") label.textContent = "-" + Math.round(k * tick / 3600e3) + "h";
+      else if (state.window === "7d") label.textContent = "-" + Math.round(k * tick / 86400e3) + "d";
+      else label.textContent = d.toLocaleDateString([], { month: "short", day: "numeric" });
       svg.appendChild(label);
     }
 
