@@ -82,24 +82,32 @@ placeholder (see "Unverified items" below).
 - **Codex-only (manual):** `codex/agents/*.toml` templates — not loaded from
   the plugin; copy into a project's `.codex/agents/`.
 
+## Verified on 2026-09-04
+
+- Claude Code: `claude plugin validate` passes; installed via
+  `/plugin marketplace add HoonStyle/tierwork` + `/plugin install tierwork@tierwork`;
+  a fresh session (no `--plugin-dir`) sees the policy section and all four
+  `tierwork:` agents.
+- Codex CLI 0.153.0: `codex plugin marketplace add <local path>` and
+  `codex plugin add tierwork@tierwork` succeed; `codex plugin list` shows it
+  installed and enabled. The `.agents/plugins/marketplace.json` shape with
+  `source: {source: "local", path: "./"}` is therefore accepted.
+
 ## Unverified items
 
 1. Whether `SessionStart` hook stdout reaches Claude Code sub-agents (the
    docs describe sub-agent initial context without mentioning this).
 2. What working directory Codex uses when running a plugin hook command
-   (whether `${CLAUDE_PLUGIN_ROOT}` fallback of `.` in
-   `hooks/session-start.sh` resolves correctly under Codex).
-3. Whether the `.agents/plugins/marketplace.json` entry shape used here
-   (`source: {source: "local", path: "./"}` at the plugin root, rather than
-   the `./plugins/<name>` convention shown in the Codex plugin-creator
-   reference) is accepted by Codex's marketplace loader.
-4. The Codex model ids in `codex/agents/*.toml` (`gpt-5.6` is a placeholder
-   marked with a `# TODO` comment — verify a current Codex model id before
+   (whether the `${CLAUDE_PLUGIN_ROOT}` fallback of `.` in
+   `hooks/session-start.sh` resolves correctly under Codex), and whether the
+   policy and skill are actually visible inside a Codex session. Install
+   succeeded, but a runtime check could not be run (workspace had no credits).
+3. The Codex model ids in `codex/agents/*.toml` (`gpt-5.6` is a placeholder
+   marked with a `# TODO` comment; verify a current Codex model id before
    use).
-5. Whether Codex's third-party plugin validator accepts a plugin whose
-   marketplace entry lives under `.agents/plugins/` at the plugin's own repo
-   root, as opposed to a separate personal (`~/.agents/plugins/`) or
-   repo/team marketplace file.
+4. Installing the Codex marketplace from GitHub
+   (`codex plugin marketplace add HoonStyle/tierwork --ref main`) rather than
+   a local path.
 
 ## Sources
 
