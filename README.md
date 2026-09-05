@@ -1,5 +1,7 @@
 # tierwork
 
+Migration work follows the shared [Greplet·Tierwork roadmap](docs/migration-roadmap.md) and [Greplet evidence release plan](docs/greplet-evidence-v1.md). The first release improves Greplet's preservation of source variants and version-bound evidence; Serena integration and Tierwork verification orchestration follow after its regression tests and real migration pilot.
+
 ## What it is
 
 Tierwork is a plugin usable by both Claude Code and OpenAI Codex CLI. It
