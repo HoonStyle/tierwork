@@ -356,6 +356,15 @@ This scenario is **not yet live-verified** for either harness.
   non-blocking behavior). The minimal Bash
   fallback fixture is intentionally skipped on Windows because it requires a
   native POSIX Bash environment; Bash syntax is still checked there.
+  Reworked the benchmark as preregistered paired repeats. Every condition now
+  preserves raw output, SHA-256, fixture/repeat/model/policy metadata, failure
+  status, and a location-only score. Answer keys carry stable defect IDs,
+  trigger conditions, expected behavior, and allowed line ranges; duplicates
+  and ambiguous matches are explicit and semantic review remains mandatory.
+  Aggregation reports n, mean, median, sample deviation, failed/unpaired runs,
+  and paired quality/cost deltas, but stays `inconclusive` until thresholds,
+  minimum sample, and independent semantic judgments are present. No paid
+  benchmark was run in this change.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment
