@@ -180,7 +180,11 @@ treated as possibly absent/missing without raising an error.
   and open the printed URL. It's stdlib-only (including the SSE stream —
   no third-party deps), binds to `127.0.0.1` only, and makes no external
   network calls of any kind; labels you add go to `~/.tierwork/labels.jsonl`
-  by default, kept separate from the hook-written log. `--log` can be
+  by default, kept separate from the hook-written log. Updating the plugin
+  does not automatically start the dashboard. Users can opt in per machine
+  with `python3 bench/dashboard-service.py enable`; `status`, `start`, `stop`,
+  and `disable` manage a localhost-only launchd, Windows Task Scheduler, or
+  Linux systemd user service. `--log` can be
   repeated and can point at a directory of `*.jsonl` files, and the page can
   export the merged, de-duped data as `/api/export.json`/`/api/export.csv`
   for moving between machines; `bench/merge.py` merges exported/raw logs from
@@ -365,6 +369,14 @@ This scenario is **not yet live-verified** for either harness.
   and paired quality/cost deltas, but stays `inconclusive` until thresholds,
   minimum sample, and independent semantic judgments are present. No paid
   benchmark was run in this change.
+
+- 0.9.0 (2026-09-09): added optional cross-platform dashboard auto-start
+  through `bench/dashboard-service.py`: native launchd on macOS, Task Scheduler
+  on Windows, and a systemd user service on Linux. Auto-start is off until
+  `enable`, remains bound to `127.0.0.1`, uses the existing 8765 default,
+  restarts after abnormal exits, and writes logs beneath `~/.tierwork/`.
+  Added service-generation/port regressions and documented lifecycle commands.
+  No custom daemon or LAN listener was added.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment
