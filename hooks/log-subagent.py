@@ -342,6 +342,7 @@ def handle_codex_subagent_stop(data):
 
     verdict = parse_field(last_text, "verdict")
     confidence = parse_field(last_text, "confidence")
+    check_status = parse_field(last_text, "check_status")
     needs_primary_review = parse_field(last_text, "needs_primary_review")
     proceed = parse_field(last_text, "proceed")
 
@@ -370,6 +371,7 @@ def handle_codex_subagent_stop(data):
         "cache_create": stats.get("cache_create") or 0,
         "verdict": verdict or None,
         "confidence": confidence or None,
+        "check_status": check_status or None,
         "needs_primary_review": needs_primary_review or None,
         "proceed": proceed or None,
         "cwd": cwd or None,
@@ -541,6 +543,7 @@ def main():
 
     verdict = parse_field(last_text, "verdict")
     confidence = parse_field(last_text, "confidence")
+    check_status = parse_field(last_text, "check_status")
     needs_primary_review = parse_field(last_text, "needs_primary_review")
     proceed = parse_field(last_text, "proceed")
 
@@ -570,6 +573,7 @@ def main():
         "cache_create": stats.get("cache_create") or 0,
         "verdict": verdict or None,
         "confidence": confidence or None,
+        "check_status": check_status or None,
         "needs_primary_review": needs_primary_review or None,
         "proceed": proceed or None,
         "cwd": cwd or None,

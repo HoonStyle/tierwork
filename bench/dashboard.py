@@ -45,7 +45,7 @@ VALID_LABELS = {"true_positive", "false_positive", "unclear"}
 CSV_COLUMNS = [
     "ts", "session_id", "agent_id", "agent_type", "runtime", "spawn_model",
     "models", "msgs", "tool_calls", "input_tokens", "output_tokens",
-    "cache_read", "cache_create", "verdict", "confidence",
+    "cache_read", "cache_create", "verdict", "confidence", "check_status",
     "needs_primary_review", "proceed", "description", "cwd", "source",
     "label", "label_note", "label_ts",
 ]

@@ -180,22 +180,25 @@ run_jq() {
   last_text="$(printf '%s' "$stats" | jq -r '.last_text // ""' 2>/dev/null)"
   last_text="${last_text:0:2000}"
 
-  # Parse verdict/confidence/needs_primary_review/proceed from last_text,
+  # Parse verdict/confidence/check_status/needs_primary_review/proceed from last_text,
   # case-insensitive, first match each.
-  local verdict confidence needs_primary_review proceed
+  local verdict confidence check_status needs_primary_review proceed
   verdict="$(printf '%s\n' "$last_text" | grep -io 'verdict:[[:space:]]*[^[:space:]]*' | head -1 | sed -E 's/^[Vv]erdict:[[:space:]]*//')"
   confidence="$(printf '%s\n' "$last_text" | grep -io 'confidence:[[:space:]]*[^[:space:]]*' | head -1 | sed -E 's/^[Cc]onfidence:[[:space:]]*//')"
+  check_status="$(printf '%s\n' "$last_text" | grep -io 'check_status:[[:space:]]*[^[:space:]]*' | head -1 | sed -E 's/^[Cc]heck_status:[[:space:]]*//')"
   needs_primary_review="$(printf '%s\n' "$last_text" | grep -io 'needs_primary_review:[[:space:]]*[^[:space:]]*' | head -1 | sed -E 's/^[Nn]eeds_primary_review:[[:space:]]*//')"
   proceed="$(printf '%s\n' "$last_text" | grep -io 'proceed:[[:space:]]*[^[:space:]]*' | head -1 | sed -E 's/^[Pp]roceed:[[:space:]]*//')"
 
   # Strip any trailing punctuation left over from prose (e.g. "confirmed.").
   verdict="$(printf '%s' "$verdict" | sed -E 's/[.,;:]+$//')"
   confidence="$(printf '%s' "$confidence" | sed -E 's/[.,;:]+$//')"
+  check_status="$(printf '%s' "$check_status" | sed -E 's/[.,;:]+$//')"
   needs_primary_review="$(printf '%s' "$needs_primary_review" | sed -E 's/[.,;:]+$//')"
   proceed="$(printf '%s' "$proceed" | sed -E 's/[.,;:]+$//')"
 
   [ -n "$verdict" ] || verdict=""
   [ -n "$confidence" ] || confidence=""
+  [ -n "$check_status" ] || check_status=""
   [ -n "$needs_primary_review" ] || needs_primary_review=""
   [ -n "$proceed" ] || proceed=""
 
@@ -220,6 +223,7 @@ run_jq() {
     --argjson cache_create "$(printf '%s' "$stats" | jq -c '.cache_create // 0')" \
     --arg verdict "$verdict" \
     --arg confidence "$confidence" \
+    --arg check_status "$check_status" \
     --arg needs_primary_review "$needs_primary_review" \
     --arg proceed "$proceed" \
     --arg cwd "$cwd" \
@@ -240,6 +244,7 @@ run_jq() {
       cache_create: $cache_create,
       verdict: (if $verdict == "" then null else $verdict end),
       confidence: (if $confidence == "" then null else $confidence end),
+      check_status: (if $check_status == "" then null else $check_status end),
       needs_primary_review: (if $needs_primary_review == "" then null else $needs_primary_review end),
       proceed: (if $proceed == "" then null else $proceed end),
       cwd: (if $cwd == "" then null else $cwd end),

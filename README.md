@@ -127,7 +127,8 @@ A `SubagentStop` hook (`hooks/log-subagent.sh`) runs after every sub-agent
 finishes. It does nothing unless the finished sub-agent's `agent_type`
 starts with `tierwork:`. For a tierwork sub-agent, it locates that
 sub-agent's transcript, computes token/tool-call counts and (for
-`bug-validator`) parses `verdict`, `confidence`, `needs_primary_review`, and
+`bug-validator`) parses `verdict`, `confidence`, `check_status`,
+`needs_primary_review`, and
 `proceed` out of its final message, and appends one JSON line describing the
 run to a local log file.
 
@@ -321,6 +322,19 @@ Codex sessions:
 This scenario is **not yet live-verified** for either harness.
 
 ## Changelog
+
+- Unreleased (2026-09-09): closed the validator fast-path boundary for the
+  task "prevent unchecked findings from being accepted automatically."
+  Target agents remain Claude Opus and the configured current Codex validator
+  model; no model version was changed. Before: a finding with no deterministic
+  check could be `confirmed` at confidence 70 and avoid primary review. After:
+  validators report `check_status: passed|failed|unavailable`, and the no-reopen
+  path requires `confirmed`, `passed`, and confidence >= 70. Python and the
+  jq-backed shell hook preserve the new field; the no-Python/no-jq minimal
+  fallback still records only lifecycle identity and status. The small benchmark fixture remains an
+  intentional historical policy snapshot so previous measurements are not
+  silently redefined. Rationale: confidence measures judgment strength, while
+  check availability is an independent safety condition.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment

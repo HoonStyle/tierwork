@@ -50,12 +50,14 @@ not by diff size):
    when gate returned any CLAUDE.md path.
 3. One `tierwork:bug-validator` per bug finding (opus). Compliance findings
    are validated by a sonnet compliance-reviewer instance, not by opus.
-4. Primary integration rules: do not re-open files for findings a validator
-   returned as confirmed with confidence >= 70; report them from the
-   validator's file:line and evidence verbatim. Read code yourself only for
-   findings marked `needs_primary_review: yes`. Final report: at most three
-   lines per finding. Recall comes from the two hunter lenses, not from the
-   primary re-reading the diff.
+4. Primary integration rules: the no-reopen fast path requires all three:
+   `verdict: confirmed`, `check_status: passed`, and confidence >= 70. Report
+   those findings from the validator's file:line and evidence verbatim. Read
+   code yourself for `needs_primary_review: yes`, missing/unknown
+   `check_status`, `check_status: unavailable`, or any inconsistent output.
+   A failed check refutes the finding regardless of confidence. Final report:
+   at most three lines per finding. Recall comes from the two hunter lenses,
+   not from the primary re-reading the diff.
 
 Before designing any fan-out of 3+ sub-agents, load the `subagent-delegation`
 skill for the full guideline.

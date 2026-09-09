@@ -112,10 +112,11 @@ returned any CLAUDE.md path. Each bug finding gets its own
 `tierwork:bug-validator` (opus); compliance findings are validated by a
 sonnet compliance-reviewer instance, not by opus — this matches the
 claude-code `/code-review` tiering by task type, not by diff size. The
-primary does not re-open files for a finding a validator returned as
-confirmed with confidence >= 70; it reports that finding from the
-validator's file:line and evidence verbatim, and reads code itself only for
-findings the validator marked `needs_primary_review: yes`.
+primary does not re-open files only when a validator returned
+`verdict: confirmed`, `check_status: passed`, and confidence >= 70. It reports that
+finding from the validator's file:line and evidence verbatim. Missing,
+unknown, or unavailable check status and `needs_primary_review: yes` require
+primary review; a failed check refutes the finding regardless of confidence.
 
 Measured (n=1 per configuration, README Measurement log): on small diffs the
 primary's re-review did not add true positives, and on medium diffs the
