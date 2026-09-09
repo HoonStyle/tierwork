@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Manage the Tierwork dashboard as an optional macOS LaunchAgent.
-
-The LaunchAgent's presence is the auto-start setting: enable installs and starts
-it; disable stops and removes it. The dashboard remains bound to 127.0.0.1.
-"""
+"""Manage optional Tierwork dashboard auto-start on macOS, Windows, and Linux."""
 
 import argparse
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -16,13 +13,28 @@ import urllib.error
 import urllib.request
 
 LABEL = "com.hoonstyle.tierwork.dashboard"
+WINDOWS_TASK = "Tierwork Dashboard"
+SYSTEMD_UNIT = "tierwork-dashboard.service"
 
 
-def paths():
-    home = Path.home()
+def platform_name(value=None):
+    value = value or sys.platform
+    if value == "darwin":
+        return "macos"
+    if value == "win32":
+        return "windows"
+    if value.startswith("linux"):
+        return "linux"
+    raise SystemExit(f"unsupported platform: {value}")
+
+
+def paths(home=None):
+    home = Path(home) if home else Path.home()
     state = home / ".tierwork"
     return {
-        "plist": home / "Library" / "LaunchAgents" / f"{LABEL}.plist",
+        "mac_plist": home / "Library" / "LaunchAgents" / f"{LABEL}.plist",
+        "windows_cmd": state / "dashboard.cmd",
+        "linux_unit": home / ".config" / "systemd" / "user" / SYSTEMD_UNIT,
         "state": state,
         "log": state / "dashboard.log",
         "error_log": state / "dashboard-error.log",
@@ -38,7 +50,7 @@ def validate_port(value):
     return port
 
 
-def plist_payload(info, port, python=sys.executable):
+def mac_plist(info, port, python=sys.executable):
     return {
         "Label": LABEL,
         "ProgramArguments": [str(python), str(info["dashboard"]), "--port", str(port)],
@@ -52,13 +64,50 @@ def plist_payload(info, port, python=sys.executable):
     }
 
 
-def write_plist(path, payload):
+def windows_script(info, port, python=sys.executable):
+    def quote(value):
+        return f'"{str(value).replace(chr(34), chr(34) * 2)}"'
+    return (
+        "@echo off\r\n"
+        f"cd /d {quote(info['working_directory'])}\r\n"
+        f"{quote(python)} {quote(info['dashboard'])} --port {port} "
+        f">>{quote(info['log'])} 2>>{quote(info['error_log'])}\r\n"
+    )
+
+
+def systemd_service(info, port, python=sys.executable):
+    command = " ".join(shlex.quote(str(value)) for value in (python, info["dashboard"], "--port", port))
+    return "\n".join([
+        "[Unit]",
+        "Description=Tierwork local dashboard",
+        "After=default.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"WorkingDirectory={info['working_directory']}",
+        f"ExecStart={command}",
+        "Restart=on-failure",
+        "RestartSec=10",
+        f"StandardOutput=append:{info['log']}",
+        f"StandardError=append:{info['error_log']}",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ])
+
+
+def atomic_write(path, content, mode=0o644, binary=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            plistlib.dump(payload, handle, sort_keys=True)
-        os.chmod(temporary, 0o644)
+        if binary:
+            with os.fdopen(fd, "wb") as handle:
+                plistlib.dump(content, handle, sort_keys=True)
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     finally:
         try:
@@ -67,28 +116,44 @@ def write_plist(path, payload):
             pass
 
 
-def domain():
+def run(command, check=True):
+    return subprocess.run(command, text=True, capture_output=True, check=check)
+
+
+def mac_domain():
     return f"gui/{os.getuid()}"
 
 
-def run_launchctl(*arguments, check=True):
-    return subprocess.run(["launchctl", *arguments], text=True, capture_output=True, check=check)
+def service_loaded(kind):
+    if kind == "macos":
+        return run(["launchctl", "print", f"{mac_domain()}/{LABEL}"], check=False).returncode == 0
+    if kind == "windows":
+        return run(["schtasks.exe", "/Query", "/TN", WINDOWS_TASK], check=False).returncode == 0
+    return run(["systemctl", "--user", "is-active", "--quiet", SYSTEMD_UNIT], check=False).returncode == 0
 
 
-def installed_port(plist_path):
+def installed(kind, info):
+    if kind == "macos":
+        return info["mac_plist"].is_file()
+    if kind == "windows":
+        return info["windows_cmd"].is_file() and service_loaded(kind)
+    return info["linux_unit"].is_file()
+
+
+def installed_port(kind, info):
     try:
-        with plist_path.open("rb") as handle:
-            payload = plistlib.load(handle)
-        arguments = payload.get("ProgramArguments", [])
-        index = arguments.index("--port")
-        return int(arguments[index + 1])
+        if kind == "macos":
+            with info["mac_plist"].open("rb") as handle:
+                arguments = plistlib.load(handle).get("ProgramArguments", [])
+            return int(arguments[arguments.index("--port") + 1])
+        if kind == "windows":
+            text = info["windows_cmd"].read_text(encoding="utf-8")
+        else:
+            text = info["linux_unit"].read_text(encoding="utf-8")
+        marker = "--port "
+        return int(text.split(marker, 1)[1].split()[0])
     except (FileNotFoundError, ValueError, IndexError, TypeError, plistlib.InvalidFileException):
         return None
-
-
-def service_loaded():
-    result = run_launchctl("print", f"{domain()}/{LABEL}", check=False)
-    return result.returncode == 0
 
 
 def http_ready(port, timeout=0.5):
@@ -99,60 +164,81 @@ def http_ready(port, timeout=0.5):
         return False
 
 
-def enable(info, port):
-    if sys.platform != "darwin":
-        raise SystemExit("dashboard auto-start currently supports macOS launchd only")
+def enable(kind, info, port):
     if not info["dashboard"].is_file():
         raise SystemExit(f"dashboard not found: {info['dashboard']}")
     info["state"].mkdir(parents=True, exist_ok=True)
-    loaded = service_loaded()
+    loaded = service_loaded(kind)
     if http_ready(port) and not loaded:
-        raise SystemExit(f"port {port} already serves HTTP outside the Tierwork LaunchAgent; stop it before enabling")
-    if loaded:
-        run_launchctl("bootout", domain(), str(info["plist"]), check=False)
-    write_plist(info["plist"], plist_payload(info, port))
-    run_launchctl("bootstrap", domain(), str(info["plist"]))
-    run_launchctl("enable", f"{domain()}/{LABEL}")
-    run_launchctl("kickstart", "-k", f"{domain()}/{LABEL}")
-    print(f"enabled: http://127.0.0.1:{port}")
-
-
-def disable(info):
-    if sys.platform != "darwin":
-        raise SystemExit("dashboard auto-start currently supports macOS launchd only")
-    run_launchctl("bootout", domain(), str(info["plist"]), check=False)
-    info["plist"].unlink(missing_ok=True)
-    print("disabled")
-
-
-def start(info):
-    if not info["plist"].is_file():
-        raise SystemExit("dashboard service is not enabled")
-    if service_loaded():
-        run_launchctl("kickstart", "-k", f"{domain()}/{LABEL}")
+        raise SystemExit(f"port {port} already serves HTTP outside the Tierwork service; stop it before enabling")
+    if kind == "macos":
+        if loaded:
+            run(["launchctl", "bootout", mac_domain(), str(info["mac_plist"])], check=False)
+        atomic_write(info["mac_plist"], mac_plist(info, port), binary=True)
+        run(["launchctl", "bootstrap", mac_domain(), str(info["mac_plist"])])
+        run(["launchctl", "enable", f"{mac_domain()}/{LABEL}"])
+        run(["launchctl", "kickstart", "-k", f"{mac_domain()}/{LABEL}"])
+    elif kind == "windows":
+        atomic_write(info["windows_cmd"], windows_script(info, port))
+        action = f'cmd.exe /d /c ""{info["windows_cmd"]}""'
+        run(["schtasks.exe", "/Create", "/F", "/TN", WINDOWS_TASK, "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", action])
+        run(["schtasks.exe", "/Run", "/TN", WINDOWS_TASK])
     else:
-        run_launchctl("bootstrap", domain(), str(info["plist"]))
-        run_launchctl("enable", f"{domain()}/{LABEL}")
-    print("started")
+        atomic_write(info["linux_unit"], systemd_service(info, port))
+        run(["systemctl", "--user", "daemon-reload"])
+        run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT])
+    print(f"enabled ({kind}): http://127.0.0.1:{port}")
 
 
-def stop(info):
-    if not service_loaded():
-        print("already stopped")
-        return
-    run_launchctl("bootout", domain(), str(info["plist"]), check=False)
-    print("stopped; auto-start remains enabled for the next login or explicit start")
+def disable(kind, info):
+    if kind == "macos":
+        run(["launchctl", "bootout", mac_domain(), str(info["mac_plist"])], check=False)
+        info["mac_plist"].unlink(missing_ok=True)
+    elif kind == "windows":
+        run(["schtasks.exe", "/End", "/TN", WINDOWS_TASK], check=False)
+        run(["schtasks.exe", "/Delete", "/F", "/TN", WINDOWS_TASK], check=False)
+        info["windows_cmd"].unlink(missing_ok=True)
+    else:
+        run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT], check=False)
+        info["linux_unit"].unlink(missing_ok=True)
+        run(["systemctl", "--user", "daemon-reload"])
+    print(f"disabled ({kind})")
 
 
-def status(info):
-    port = installed_port(info["plist"]) or 8765
+def start(kind, info):
+    if not installed(kind, info):
+        raise SystemExit("dashboard service is not enabled")
+    if kind == "macos":
+        if service_loaded(kind):
+            run(["launchctl", "kickstart", "-k", f"{mac_domain()}/{LABEL}"])
+        else:
+            run(["launchctl", "bootstrap", mac_domain(), str(info["mac_plist"])])
+    elif kind == "windows":
+        run(["schtasks.exe", "/Run", "/TN", WINDOWS_TASK])
+    else:
+        run(["systemctl", "--user", "start", SYSTEMD_UNIT])
+    print(f"started ({kind})")
+
+
+def stop(kind, info):
+    if kind == "macos":
+        run(["launchctl", "bootout", mac_domain(), str(info["mac_plist"])], check=False)
+    elif kind == "windows":
+        run(["schtasks.exe", "/End", "/TN", WINDOWS_TASK], check=False)
+    else:
+        run(["systemctl", "--user", "stop", SYSTEMD_UNIT], check=False)
+    print(f"stopped ({kind}); auto-start remains enabled")
+
+
+def status(kind, info):
+    port = installed_port(kind, info) or 8765
     payload = {
-        "enabled": info["plist"].is_file(),
-        "loaded": service_loaded() if sys.platform == "darwin" else False,
+        "platform": kind,
+        "enabled": installed(kind, info),
+        "loaded": service_loaded(kind),
         "ready": http_ready(port),
         "url": f"http://127.0.0.1:{port}",
         "port": port,
-        "plist": str(info["plist"]),
         "log": str(info["log"]),
         "errorLog": str(info["error_log"]),
     }
@@ -165,19 +251,20 @@ def main():
     parser.add_argument("action", choices=("enable", "disable", "start", "stop", "restart", "status"))
     parser.add_argument("--port", type=validate_port, default=8765)
     args = parser.parse_args()
-    info = paths()
+    kind, info = platform_name(), paths()
     if args.action == "enable":
-        enable(info, args.port)
+        enable(kind, info, args.port)
     elif args.action == "disable":
-        disable(info)
+        disable(kind, info)
     elif args.action == "start":
-        start(info)
+        start(kind, info)
     elif args.action == "stop":
-        stop(info)
+        stop(kind, info)
     elif args.action == "restart":
-        start(info)
+        stop(kind, info)
+        start(kind, info)
     else:
-        return status(info)
+        return status(kind, info)
     return 0
 
 

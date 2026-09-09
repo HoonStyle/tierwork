@@ -14,7 +14,9 @@ SPEC.loader.exec_module(service)
 class DashboardServiceTest(unittest.TestCase):
     def info(self, root):
         return {
-            "plist": root / "Library" / "LaunchAgents" / "service.plist",
+            "mac_plist": root / "Library" / "LaunchAgents" / "service.plist",
+            "windows_cmd": root / ".tierwork" / "dashboard.cmd",
+            "linux_unit": root / ".config" / "systemd" / "user" / "tierwork-dashboard.service",
             "state": root / ".tierwork",
             "log": root / ".tierwork" / "dashboard.log",
             "error_log": root / ".tierwork" / "dashboard-error.log",
@@ -22,25 +24,47 @@ class DashboardServiceTest(unittest.TestCase):
             "working_directory": root / "repo",
         }
 
-    def test_plist_is_local_background_launch_agent(self):
+    def test_platform_detection(self):
+        self.assertEqual(service.platform_name("darwin"), "macos")
+        self.assertEqual(service.platform_name("win32"), "windows")
+        self.assertEqual(service.platform_name("linux"), "linux")
+        with self.assertRaises(SystemExit):
+            service.platform_name("plan9")
+
+    def test_macos_plist_is_local_background_launch_agent(self):
         with tempfile.TemporaryDirectory() as temporary:
             info = self.info(Path(temporary))
-            payload = service.plist_payload(info, 8765, python="/usr/local/bin/python3")
+            payload = service.mac_plist(info, 8765, python="/usr/local/bin/python3")
             self.assertEqual(payload["Label"], service.LABEL)
             self.assertEqual(payload["ProgramArguments"][-2:], ["--port", "8765"])
             self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
             self.assertTrue(payload["RunAtLoad"])
-            self.assertNotIn("0.0.0.0", " ".join(payload["ProgramArguments"]))
+            service.atomic_write(info["mac_plist"], payload, binary=True)
+            with info["mac_plist"].open("rb") as handle:
+                self.assertEqual(plistlib.load(handle), payload)
+            self.assertEqual(service.installed_port("macos", info), 8765)
 
-    def test_atomic_write_and_installed_port(self):
+    def test_windows_task_script_is_quoted_and_local(self):
         with tempfile.TemporaryDirectory() as temporary:
             info = self.info(Path(temporary))
-            payload = service.plist_payload(info, 9876)
-            service.write_plist(info["plist"], payload)
-            with info["plist"].open("rb") as handle:
-                self.assertEqual(plistlib.load(handle), payload)
-            self.assertEqual(service.installed_port(info["plist"]), 9876)
-            self.assertEqual(info["plist"].stat().st_mode & 0o777, 0o644)
+            script = service.windows_script(info, 9876, python="C:\\Program Files\\Python\\python.exe")
+            self.assertIn('"C:\\Program Files\\Python\\python.exe"', script)
+            self.assertIn("--port 9876", script)
+            self.assertIn("dashboard-error.log", script)
+            self.assertNotIn("0.0.0.0", script)
+            service.atomic_write(info["windows_cmd"], script)
+            self.assertEqual(service.installed_port("windows", info), 9876)
+
+    def test_linux_systemd_unit_restarts_on_failure_and_stays_local(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            info = self.info(Path(temporary))
+            unit = service.systemd_service(info, 7654, python="/usr/bin/python3")
+            self.assertIn("Restart=on-failure", unit)
+            self.assertIn("--port 7654", unit)
+            self.assertIn("WantedBy=default.target", unit)
+            self.assertNotIn("0.0.0.0", unit)
+            service.atomic_write(info["linux_unit"], unit)
+            self.assertEqual(service.installed_port("linux", info), 7654)
 
     def test_port_validation(self):
         self.assertEqual(service.validate_port("8765"), 8765)

@@ -33,11 +33,12 @@ turns) to stdout.
 
 ## Dashboard
 
-### Optional macOS auto-start
+### Optional dashboard auto-start
 
-The dashboard does not auto-start merely because Tierwork was updated. On
-macOS, use the stdlib-only LaunchAgent manager to make auto-start an explicit
-per-machine setting:
+The dashboard does not auto-start merely because Tierwork was updated. Use the
+stdlib-only service manager to make auto-start an explicit per-machine setting.
+It selects native launchd on macOS, Task Scheduler on Windows, and a systemd
+user service on Linux:
 
 ```bash
 python3 bench/dashboard-service.py enable [--port 8765]
@@ -47,13 +48,14 @@ python3 bench/dashboard-service.py start
 python3 bench/dashboard-service.py disable
 ```
 
-`enable` installs `~/Library/LaunchAgents/com.hoonstyle.tierwork.dashboard.plist`,
-starts it immediately, and restarts it after abnormal exits. `stop` unloads it
-until the next login or explicit `start`; `disable` unloads it and removes the
-plist. Output stays under `~/.tierwork/dashboard.log` and
+`enable` installs and immediately starts the platform-native user service:
+`~/Library/LaunchAgents/com.hoonstyle.tierwork.dashboard.plist` on macOS,
+`Tierwork Dashboard` in Windows Task Scheduler, or
+`~/.config/systemd/user/tierwork-dashboard.service` on Linux. `stop` stops the
+current run while preserving login auto-start; `disable` stops and removes the
+service definition. Output stays under `~/.tierwork/dashboard.log` and
 `dashboard-error.log`. The dashboard remains fixed to `127.0.0.1`, so enabling
-auto-start does not expose it to the LAN. Windows/Linux service installation is
-not implemented.
+auto-start does not expose it to the LAN. Linux requires a user systemd session.
 
 `bench/status.py` provides a one-shot, stdlib-only diagnostic view suitable
 for a person or parent agent:
