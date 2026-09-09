@@ -33,6 +33,28 @@ turns) to stdout.
 
 ## Dashboard
 
+### Optional macOS auto-start
+
+The dashboard does not auto-start merely because Tierwork was updated. On
+macOS, use the stdlib-only LaunchAgent manager to make auto-start an explicit
+per-machine setting:
+
+```bash
+python3 bench/dashboard-service.py enable [--port 8765]
+python3 bench/dashboard-service.py status
+python3 bench/dashboard-service.py stop
+python3 bench/dashboard-service.py start
+python3 bench/dashboard-service.py disable
+```
+
+`enable` installs `~/Library/LaunchAgents/com.hoonstyle.tierwork.dashboard.plist`,
+starts it immediately, and restarts it after abnormal exits. `stop` unloads it
+until the next login or explicit `start`; `disable` unloads it and removes the
+plist. Output stays under `~/.tierwork/dashboard.log` and
+`dashboard-error.log`. The dashboard remains fixed to `127.0.0.1`, so enabling
+auto-start does not expose it to the LAN. Windows/Linux service installation is
+not implemented.
+
 `bench/status.py` provides a one-shot, stdlib-only diagnostic view suitable
 for a person or parent agent:
 
