@@ -160,6 +160,12 @@ treated as possibly absent/missing without raising an error.
   (per-`agent_type` counts/models/tokens, bug-validator verdict
   distribution and `needs_primary_review` share, per-day counts). With no
   argument it reads `TIERWORK_LOG` or `~/.tierwork/reviews.jsonl`.
+- Run `bench/status.py [--session ID] [--agent ID] [--json]` for a one-shot
+  diagnostic view of currently recorded running work and recent completions.
+  This is recorded hook state, not authoritative process liveness or proof
+  that the parent retrieved or integrated a result. Its newest-event merge
+  prevents an older done row from hiding a newer resumed start; assignment
+  generation is still unavailable.
 - **Status: new, not yet used for a real labeling pass.** `bench/dashboard.py`
   serves a local, browser-based "mission control" view of the same log — a
   KPI strip, review swimlanes, a live feed, a tier cost bar, a verdict
@@ -295,7 +301,35 @@ bugs. See `bench/README.md` for how to run a pair and read the results.
   optimizer docs (no cost data).
 - Anthropic API pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
 
+### Harness-supervision manual acceptance
+
+The policy and one-shot status tool are mechanically tested but parent behavior
+must be verified in each live harness. For both Claude Code and trusted-hook
+Codex sessions:
+
+1. Launch one fast and one slow background sub-agent and retain both handles.
+2. Confirm the parent collects the fast terminal result without waiting for the
+   slow agent or for a user reminder.
+3. During a silent wait, confirm bounded status/wait checks occur without a
+   duplicate launch or silence-based cancellation.
+4. Simulate a missed completion notification; use a session-and-agent-matched
+   `bench/status.py` done row only to trigger harness-native result retrieval.
+5. Before the final response, confirm every assignment is marked separately as
+   completion observed, result retrieved, and result integrated—or is reported
+   as blocked.
+
+This scenario is **not yet live-verified** for either harness.
+
 ## Changelog
+
+- 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
+  delegation skill and SessionStart policy. Parents now retain assignment
+  handles, wait/check in short windows, collect terminal results promptly, and
+  reconcile observed/retrieved/integrated states without treating silence as
+  failure. Added stdlib-only `bench/status.py` with assignment-oriented latest
+  event handling, filters, JSON output, explicit diagnostics, and focused
+  regressions. This records and diagnoses state; hooks still cannot wake a
+  parent process. Live harness acceptance remains pending.
 
 - 0.7.0 (2026-09-04): data log works under Codex too. `hooks/log-subagent.py`
   detects a Codex hook call (presence of `agent_transcript_path` or a

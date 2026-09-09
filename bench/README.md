@@ -33,6 +33,24 @@ turns) to stdout.
 
 ## Dashboard
 
+`bench/status.py` provides a one-shot, stdlib-only diagnostic view suitable
+for a person or parent agent:
+
+```bash
+python3 bench/status.py [--log ~/.tierwork/reviews.jsonl] [--session ID] [--agent ID]
+python3 bench/status.py --session ID --json
+```
+
+It reports all latest recorded `running` rows, completions recorded within the
+last five minutes by default, unknown statuses, and malformed/missing/unreadable
+input diagnostics. Its merge is deliberately assignment-oriented: the newest
+valid timestamp wins for one `session_id`+`agent_id`, so a newer resumed start
+is not hidden by an older completion; a same-time completion wins a start.
+This differs from the dashboard's historical done-over-running merge and does
+not change that existing contract. Output is recorded hook status only—not
+process liveness, success, result retrieval, or parent integration. Missing
+rows are inconclusive, and assignment generation is unavailable.
+
 `bench/dashboard.py` is a small local review dashboard for the
 `SubagentStop` data log (`~/.tierwork/reviews.jsonl` by default; see the main
 README's "Data log" section for how that log is produced). Stdlib only

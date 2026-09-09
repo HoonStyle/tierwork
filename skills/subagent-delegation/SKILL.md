@@ -162,6 +162,47 @@ are dropped because false positives erode trust.
   keep 1 hour [CL 2.1.243]; launch parallel batches together rather than
   spreading identical prompts over time.
 
+## Harness supervision lifecycle
+
+Apply this lifecycle even when only one background sub-agent is running.
+
+1. On spawn, retain the harness-returned handle/agent ID, session ID when
+   available, assignment, assignment generation or follow-up marker, and any
+   result/transcript pointer. Preserve the outstanding-work ledger through
+   compaction; an older completion for a resumed agent does not satisfy a newer
+   assignment.
+2. Continue genuinely independent primary work while agents run. At useful work
+   boundaries, check outstanding handles. When the primary is otherwise waiting,
+   use the harness-native wait/status operation in bounded approximately 20–30
+   second windows, following its actual schema and higher-priority instructions.
+3. Collect each terminal result at the next opportunity instead of waiting for
+   the whole batch. A completion notification and result retrieval may be
+   separate operations. Record completion observed, result retrieved, and result
+   integrated as distinct ledger states.
+4. Before the final response, reconcile every outstanding assignment. If result
+   retrieval remains blocked, report that accurately; never claim that a logged
+   completion was successfully collected or integrated.
+
+Silence is not failure. Keep `running`, timeout, unavailable status tooling,
+explicit failure, cancellation, completion observed, result retrieved, and
+result integrated distinct. Never relaunch or cancel from silence alone. First
+check the current harness handle and recent activity. Tierwork's recorded hook
+log may help diagnose missed delivery:
+
+```bash
+python3 bench/status.py --session <session-id>
+python3 bench/status.py --session <session-id> --agent <agent-id> --json
+```
+
+The log is not authoritative process liveness: `done` can exist without a
+readable result, hook absence is inconclusive, Codex hooks may be untrusted, and
+assignment generation is not recorded. A matching `done` row is only a trigger
+to retrieve through the harness-native result operation. If that path fails,
+read only a transcript pointer already returned for the exact session and agent;
+never select an arbitrary recent transcript. Tierwork hooks and the human
+dashboard cannot wake a parent agent, so proactive bounded waiting remains the
+primary's responsibility.
+
 ## Context passed to sub-agents
 
 - A normal sub-agent starts with a fresh context. A `fork` sub-agent inherits

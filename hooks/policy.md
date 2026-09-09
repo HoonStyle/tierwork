@@ -30,6 +30,17 @@
 - Sub-agent reports must include: conclusions, file:line evidence, a
   confidence score or level, and explicit gaps/blockers.
 - Deterministic checks gate LLM verdicts, never the reverse.
+- Supervise every background assignment: retain its current handle/agent ID and
+  assignment generation; while waiting, use harness-native wait/status calls in
+  bounded approximately 20–30 second windows; collect each terminal result at
+  the next opportunity rather than waiting for the full batch.
+- Track completion observed, result retrieved, and result integrated separately.
+  Reconcile all outstanding assignments before the final answer. Silence alone
+  never authorizes cancellation or a duplicate launch.
+- Tierwork `running`/`done` hook rows are recorded diagnostics, not process
+  liveness or proof of successful result collection. A session-and-agent-matched
+  `done` row triggers harness-native retrieval; hook absence is inconclusive.
+  Never recover from an arbitrary recent transcript.
 
 Code-review order (follows claude-code /code-review; tiers by task type,
 not by diff size):
