@@ -15,20 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dashboard  # noqa: E402
-
-KNOWN_STATUS = {"running", "done"}
-
-
-def parse_ts(value):
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
-    except (TypeError, ValueError):
-        return None
+from recorded_state import latest_recorded, parse_ts, recorded_status  # noqa: E402
 
 
 def read_rows(paths):
@@ -60,42 +47,13 @@ def read_rows(paths):
     return rows, diagnostics
 
 
-def latest_recorded(rows):
-    """Latest valid event per identity; a same-time done event wins a start.
-
-    Unlike dashboard historical merge, a newer running event wins an older done
-    event for a resumed/reused agent id. Generation remains unavailable, so the
-    result is diagnostic rather than authoritative liveness.
-    """
-    latest = {}
-    skipped = {"invalidIdentity": 0, "invalidTimestamp": 0}
-    for index, row in enumerate(rows):
-        session_id, agent_id = row.get("session_id"), row.get("agent_id")
-        if not isinstance(session_id, str) or not session_id.strip() or not isinstance(agent_id, str) or not agent_id.strip():
-            skipped["invalidIdentity"] += 1
-            continue
-        parsed = parse_ts(row.get("ts"))
-        if parsed is None:
-            skipped["invalidTimestamp"] += 1
-            continue
-        key = (session_id, agent_id)
-        status = row.get("status")
-        tie_rank = 1 if status in (None, "done") else 0
-        candidate = (parsed, tie_rank, index, row)
-        if key not in latest or candidate[:3] >= latest[key][:3]:
-            latest[key] = candidate
-    return [value[3] for value in latest.values()], skipped
-
-
 def compact(row):
-    status = row.get("status")
-    recorded = "done" if status is None else status if status in KNOWN_STATUS else "unknown"
     return {
         "sessionId": row.get("session_id"),
         "agentId": row.get("agent_id"),
         "agentType": row.get("agent_type") or "unknown",
         "runtime": row.get("runtime") or "unknown",
-        "recordedStatus": recorded,
+        "recordedStatus": recorded_status(row),
         "recordedAt": row.get("ts"),
         "description": row.get("description"),
         "source": row.get("source"),
@@ -112,14 +70,18 @@ def build_status(rows, diagnostics, *, session=None, agent=None, recent_seconds=
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     running, completed, unknown = [], [], []
+    future_timestamps = 0
     for row in deduped:
-        status = row.get("status")
+        status = recorded_status(row)
         item = compact(row)
+        age = (current - parse_ts(row.get("ts"))).total_seconds()
+        if age < 0:
+            future_timestamps += 1
+            continue
         if status == "running":
             running.append(item)
-        elif status is None or status == "done":
-            age = (current - parse_ts(row.get("ts"))).total_seconds()
-            if 0 <= age <= recent_seconds:
+        elif status == "done":
+            if age <= recent_seconds:
                 completed.append(item)
         else:
             unknown.append(item)
@@ -136,7 +98,12 @@ def build_status(rows, diagnostics, *, session=None, agent=None, recent_seconds=
         "inFlight": sorted(running, key=key, reverse=True),
         "recentlyCompleted": sorted(completed, key=key, reverse=True),
         "unknownStatus": sorted(unknown, key=key, reverse=True),
-        "diagnostics": {**diagnostics, **skipped, "validLatestAssignments": len(deduped)},
+        "diagnostics": {
+            **diagnostics,
+            **skipped,
+            "futureTimestamps": future_timestamps,
+            "validLatestAssignments": len(deduped),
+        },
     }
 
 
@@ -152,7 +119,7 @@ def render_text(payload):
         for item in payload[key]:
             lines.append(f"- {item['runtime']} {item['agentType']} session={item['sessionId']} agent={item['agentId']} at={item['recordedAt']}")
     diag = payload["diagnostics"]
-    lines.append(f"\nSkipped: identity={diag['invalidIdentity']} timestamp={diag['invalidTimestamp']} malformed={diag['malformedLines']} unreadable={diag['unreadableFiles']} missing={diag['missingFiles']}")
+    lines.append(f"\nSkipped: identity={diag['invalidIdentity']} timestamp={diag['invalidTimestamp']} future={diag['futureTimestamps']} malformed={diag['malformedLines']} unreadable={diag['unreadableFiles']} missing={diag['missingFiles']}")
     lines.append("A done record triggers harness-native result retrieval; it is not proof the result was collected.")
     return "\n".join(lines)
 

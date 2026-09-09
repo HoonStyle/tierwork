@@ -1,0 +1,8 @@
+{
+  "minimum_pairs": null,
+  "recall_noninferiority_margin": null,
+  "precision_noninferiority_margin": null,
+  "minimum_cost_improvement_fraction": null,
+  "maximum_total_cost_usd": null,
+  "note": "Set these values before the first paid run. Null keeps every claim inconclusive."
+}

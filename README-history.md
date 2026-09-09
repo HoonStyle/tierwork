@@ -2,7 +2,7 @@
 
 [Back to README](README.md)
 
-This is the pre-reorganization README, preserved as a historical record. Version-specific observations and unverified hypotheses below are not a single current contract; later entries may supersede earlier ones. For installation and current scope, start with the main README. No historical benchmark was rerun during this documentation edit.
+This preserves the upstream README as of commit e9551c2, including the validator fast-path and logging changes. Version-specific observations and earlier unverified hypotheses are historical records, not a single current contract. Later entries can supersede earlier ones. Start with the main README for current usage.
 
 Migration work follows the shared [Greplet·Tierwork roadmap](docs/migration-roadmap.md) and [Greplet evidence release plan](docs/greplet-evidence-v1.md). The first release improves Greplet's preservation of source variants and version-bound evidence; Serena integration and Tierwork verification orchestration follow after its regression tests and real migration pilot.
 
@@ -131,7 +131,8 @@ A `SubagentStop` hook (`hooks/log-subagent.sh`) runs after every sub-agent
 finishes. It does nothing unless the finished sub-agent's `agent_type`
 starts with `tierwork:`. For a tierwork sub-agent, it locates that
 sub-agent's transcript, computes token/tool-call counts and (for
-`bug-validator`) parses `verdict`, `confidence`, `needs_primary_review`, and
+`bug-validator`) parses `verdict`, `confidence`, `check_status`,
+`needs_primary_review`, and
 `proceed` out of its final message, and appends one JSON line describing the
 run to a local log file.
 
@@ -169,7 +170,8 @@ treated as possibly absent/missing without raising an error.
   This is recorded hook state, not authoritative process liveness or proof
   that the parent retrieved or integrated a result. Its newest-event merge
   prevents an older done row from hiding a newer resumed start; assignment
-  generation is still unavailable.
+  generation is still unavailable. Future-dated records are excluded from the
+  state lists and counted in diagnostics.
 - **Status: new, not yet used for a real labeling pass.** `bench/dashboard.py`
   serves a local, browser-based "mission control" view of the same log — a
   KPI strip, review swimlanes, a live feed, a tier cost bar, a verdict
@@ -192,8 +194,8 @@ treated as possibly absent/missing without raising an error.
   for moving between machines; `bench/merge.py` merges exported/raw logs from
   multiple machines into one de-duped JSONL file. As of 0.6.1 it also
   understands the `SubagentStart` hook's `status: "running"` rows: a
-  `"done"` (or legacy, no-`status`) row always wins the merge over a
-  `"running"` row for the same key, else the latest `ts` wins; in-flight runs
+  row with the latest valid `ts` wins for the same key, with `"done"` (or
+  legacy, no-`status`) winning only when timestamps tie; in-flight runs
   render as a pulsing hollow swimlane mark, a live-feed "running · Xs" line,
   and a dashed "running" verdict chip, are excluded from the "Sub-agent
   runs" KPI, and are counted in a new "in flight: N" status line. See
@@ -329,6 +331,48 @@ Codex sessions:
 This scenario is **not yet live-verified** for either harness.
 
 ## Changelog
+
+- Unreleased (2026-09-09): closed the validator fast-path boundary for the
+  task "prevent unchecked findings from being accepted automatically."
+  Target agents remain Claude Opus and the configured current Codex validator
+  model; no model version was changed. Before: a finding with no deterministic
+  check could be `confirmed` at confidence 70 and avoid primary review. After:
+  validators report `check_status: passed|failed|unavailable`, and the no-reopen
+  path requires `confirmed`, `passed`, and confidence >= 70. Python and the
+  jq-backed shell hook preserve the new field; the no-Python/no-jq minimal
+  fallback still records only lifecycle identity and status. The small benchmark fixture remains an
+  intentional historical policy snapshot so previous measurements are not
+  silently redefined. Rationale: confidence measures judgment strength, while
+  check availability is an independent safety condition.
+  Aligned status merging across the one-shot status view, dashboard/API,
+  exports, SSE updates, and offline merge: latest valid timestamp wins and a
+  recorded completion wins only at the same timestamp. Unknown/future statuses
+  remain unknown and are excluded from completed-run metrics; invalid identity
+  or timestamp rows are skipped with diagnostics where the status CLI exposes
+  them. This remains recorded hook history, not authoritative process liveness,
+  and no assignment generation is synthesized.
+  The dashboard SSE watcher now retains incomplete JSONL bytes per file and
+  parses only newline-terminated UTF-8 records. Split appends, multibyte splits,
+  CRLF, truncate, and file replacement are covered by deterministic tests;
+  rejected complete records are counted at `/api/diagnostics`.
+  Expanded stdlib regression coverage for timezone/tie/filter/recency/CLI
+  status behavior and for Claude/Codex hook parsing, transcript attribution,
+  missing input, and concurrent appends. Codex rollout fallback now verifies
+  `session_meta.payload.id` instead of trusting a filename substring, and the
+  Python hook serializes concurrent writers with a bounded one-second
+  `<log>.lock` sidecar lock (then silently gives up, preserving hook
+  non-blocking behavior). The minimal Bash
+  fallback fixture is intentionally skipped on Windows because it requires a
+  native POSIX Bash environment; Bash syntax is still checked there.
+  Reworked the benchmark as preregistered paired repeats. Every condition now
+  preserves raw output, SHA-256, fixture/repeat/model/policy metadata, failure
+  status, and a location-only score. Answer keys carry stable defect IDs,
+  trigger conditions, expected behavior, and allowed line ranges; duplicates
+  and ambiguous matches are explicit and semantic review remains mandatory.
+  Aggregation reports n, mean, median, sample deviation, failed/unpaired runs,
+  and paired quality/cost deltas, but stays `inconclusive` until thresholds,
+  minimum sample, and independent semantic judgments are present. No paid
+  benchmark was run in this change.
 
 - 0.9.0 (2026-09-09): added optional cross-platform dashboard auto-start
   through `bench/dashboard-service.py`: native launchd on macOS, Task Scheduler

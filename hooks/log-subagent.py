@@ -32,6 +32,62 @@ def read_jsonl(path):
     return records
 
 
+def append_jsonl(path, record):
+    """Append one complete JSONL record under a short cross-process lock."""
+    payload = (
+        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    lock = None
+    locked = False
+    try:
+        lock = open(os.fspath(path) + ".lock", "a+b")
+        deadline = time.monotonic() + 1.0
+        if os.name == "nt":
+            import msvcrt
+
+            lock.seek(0, os.SEEK_END)
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
+            while time.monotonic() < deadline:
+                try:
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        else:
+            import fcntl
+
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except OSError:
+                    time.sleep(0.01)
+        if not locked:
+            return False
+        with open(path, "ab") as output:
+            written = output.write(payload)
+    except (OSError, ImportError):
+        return False
+    finally:
+        if lock is not None and locked:
+            try:
+                lock.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except (OSError, NameError):
+                pass
+        if lock is not None:
+            lock.close()
+    return written == len(payload)
+
+
 def last_text_has_content(records):
     for rec in reversed(records):
         if not isinstance(rec, dict):
@@ -150,6 +206,24 @@ def read_rollout_jsonl(path):
     return read_jsonl(path)
 
 
+def rollout_thread_id(path):
+    """Read only far enough to find a rollout's session identity."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "session_meta":
+                    continue
+                payload = record.get("payload")
+                return payload.get("id") if isinstance(payload, dict) else None
+    except OSError:
+        return None
+    return None
+
+
 def find_rollout_by_thread_id(agent_id):
     """Best-effort fallback when agent_transcript_path isn't in the hook
     input: scan ~/.codex/sessions/**/rollout-*.jsonl for a session_meta
@@ -164,12 +238,15 @@ def find_rollout_by_thread_id(agent_id):
     candidates = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for fn in filenames:
-            if fn.startswith("rollout-") and fn.endswith(".jsonl") and agent_id in fn:
+            if fn.startswith("rollout-") and fn.endswith(".jsonl"):
                 candidates.append(os.path.join(dirpath, fn))
     if not candidates:
         return ""
     candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    return candidates[0]
+    for candidate in candidates:
+        if rollout_thread_id(candidate) == agent_id:
+            return candidate
+    return ""
 
 
 def compute_codex_stats(records):
@@ -308,12 +385,7 @@ def handle_codex_subagent_start(data):
         "cwd": cwd or None,
         "runtime": "codex",
     }
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-    except OSError:
-        return 0
+    append_jsonl(log_path, record)
     return 0
 
 
@@ -342,6 +414,7 @@ def handle_codex_subagent_stop(data):
 
     verdict = parse_field(last_text, "verdict")
     confidence = parse_field(last_text, "confidence")
+    check_status = parse_field(last_text, "check_status")
     needs_primary_review = parse_field(last_text, "needs_primary_review")
     proceed = parse_field(last_text, "proceed")
 
@@ -370,18 +443,14 @@ def handle_codex_subagent_stop(data):
         "cache_create": stats.get("cache_create") or 0,
         "verdict": verdict or None,
         "confidence": confidence or None,
+        "check_status": check_status or None,
         "needs_primary_review": needs_primary_review or None,
         "proceed": proceed or None,
         "cwd": cwd or None,
         "description": None,
         "runtime": "codex",
     }
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-    except OSError:
-        return 0
+    append_jsonl(log_path, record)
     return 0
 
 
@@ -427,12 +496,7 @@ def handle_subagent_start(session_id, agent_id, agent_type, transcript_path, cwd
         "runtime": "claude",
     }
 
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-    except OSError:
-        return 0
+    append_jsonl(log_path, record)
 
     return 0
 
@@ -541,6 +605,7 @@ def main():
 
     verdict = parse_field(last_text, "verdict")
     confidence = parse_field(last_text, "confidence")
+    check_status = parse_field(last_text, "check_status")
     needs_primary_review = parse_field(last_text, "needs_primary_review")
     proceed = parse_field(last_text, "proceed")
 
@@ -570,6 +635,7 @@ def main():
         "cache_create": stats.get("cache_create") or 0,
         "verdict": verdict or None,
         "confidence": confidence or None,
+        "check_status": check_status or None,
         "needs_primary_review": needs_primary_review or None,
         "proceed": proceed or None,
         "cwd": cwd or None,
@@ -577,12 +643,7 @@ def main():
         "runtime": "claude",
     }
 
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-    except OSError:
-        return 0
+    append_jsonl(log_path, record)
 
     return 0
 

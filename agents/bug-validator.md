@@ -62,10 +62,20 @@ showed.
 If the claim does not hold up under your own reading of the code, refute it —
 do not give the benefit of the doubt.
 
-Deterministic checks are a hard gate, not advice: a finding whose
-deterministic check fails is refuted regardless of how convincing the LLM
-reasoning looks, and a finding with no applicable deterministic check must be
-reported with confidence capped at 70. Rationale: in self-improving loops,
+Deterministic checks are a hard gate, not advice. Report their validation
+status separately from the command exit code:
+
+- `passed` means an applicable check completed and its result supports the
+  reported verdict. A non-zero compiler/test exit may support a bug finding,
+  so this is not a synonym for process exit code 0.
+- `failed` means an applicable check completed and contradicts the finding;
+  the verdict must be `refuted`.
+- `unavailable` means no applicable check exists or the check was
+  inconclusive. A finding with this status requires primary review even when
+  the LLM judgment confirms it.
+
+A finding with no applicable deterministic check must be reported with
+confidence capped at 70. Rationale: in self-improving loops,
 optimization does not average out evaluator error, it performs gradient
 ascent on it; in the reported experiments an environment leak produced a 100%
 (47/47) reported score against 68.1% in a hermetic sandbox, and
@@ -80,10 +90,13 @@ Return exactly:
 verdict: confirmed|refuted
 evidence: file:line
 deterministic_checks: <each command run and its outcome, or "none">
+check_status: passed|failed|unavailable
 reasoning: <one paragraph, from the code you read, not the finder's description>
 confidence: <0-100, capped at 70 when deterministic_checks is none>
 needs_primary_review: yes|no
 ```
 
-`needs_primary_review` is `yes` only when the verdict is inconclusive or
-`confidence` is below 70; otherwise `no`.
+`needs_primary_review` is `yes` when `check_status` is not `passed`, the
+evidence is insufficient, or `confidence` is below 70. It is `no` only for a
+`confirmed` or `refuted` verdict backed by `check_status: passed` at confidence
+70 or higher. When in doubt, return `yes`.

@@ -18,6 +18,7 @@ Routes:
                        (by session_id+agent_id) from the labels file
     GET  /api/events  Server-Sent Events stream of newly appended rows,
                        polled from the --log file(s) every second
+    GET  /api/diagnostics  skipped complete-record counters for the watcher
     POST /api/label   body {"session_id", "agent_id", "label", "note"};
                        appends one JSON line to the labels file
 
@@ -40,12 +41,14 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from recorded_state import identity_key, latest_recorded
+
 VALID_LABELS = {"true_positive", "false_positive", "unclear"}
 
 CSV_COLUMNS = [
-    "ts", "session_id", "agent_id", "agent_type", "runtime", "spawn_model",
+    "ts", "status", "session_id", "agent_id", "agent_type", "runtime", "spawn_model",
     "models", "msgs", "tool_calls", "input_tokens", "output_tokens",
-    "cache_read", "cache_create", "verdict", "confidence",
+    "cache_read", "cache_create", "verdict", "confidence", "check_status",
     "needs_primary_review", "proceed", "description", "cwd", "source",
     "label", "label_note", "label_ts",
 ]
@@ -89,71 +92,14 @@ def load_jsonl_multi(paths):
     return rows
 
 
-def _parse_ts(row):
-    ts = row.get("ts")
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-
-
-def _status_rank(row):
-    """Win-tier for the merge rule: a "done" row (or a legacy row with no
-    `status` field at all, since it predates the SubagentStart hook) always
-    outranks a "running" row. Returns 1 for done/legacy, 0 for running."""
-    status = row.get("status")
-    if status is None or status == "done":
-        return 1
-    if status == "running":
-        return 0
-    # Unknown/future status values: treat like done/legacy (highest rank)
-    # rather than silently losing to a running row.
-    return 1
-
-
 def dedup_rows(rows):
     """De-duplicate rows by (session_id, agent_id).
 
-    Merge rule: a row's win-tier (`_status_rank`) is compared first -- a
-    "done"/legacy row always beats a "running" row sharing the same key,
-    regardless of `ts`. Among rows sharing both the same key and the same
-    win-tier, the row with the latest parsed `ts` wins; rows with a
-    missing/unparseable ts are treated as the lowest priority within their
-    tier. On a tie (or comparison error), the later-loaded row wins. Pure
-    function, order of `rows` matters only as a tie-breaker."""
-    best = {}
-    order = {}
-    for i, row in enumerate(rows):
-        key = (row.get("session_id"), row.get("agent_id"))
-        rank = _status_rank(row)
-        parsed = _parse_ts(row)
-        current = best.get(key)
-        if current is None:
-            best[key] = row
-            order[key] = (rank, parsed, i)
-            continue
-        cur_rank, cur_parsed, cur_i = order[key]
-        take_new = False
-        if rank != cur_rank:
-            take_new = rank > cur_rank
-        # Same win-tier: latest ts wins; None (unparseable) sorts lowest;
-        # ties/later-loaded win.
-        elif parsed is None and cur_parsed is None:
-            take_new = i >= cur_i
-        elif parsed is None:
-            take_new = False
-        elif cur_parsed is None:
-            take_new = True
-        elif parsed > cur_parsed:
-            take_new = True
-        elif parsed == cur_parsed:
-            take_new = i >= cur_i
-        if take_new:
-            best[key] = row
-            order[key] = (rank, parsed, i)
-    return list(best.values())
+    The latest valid timestamp wins. At the same timestamp only, a done or
+    legacy stop row wins over another recorded state. Invalid identity or
+    timestamp rows are excluded, and unknown/future statuses stay unknown.
+    This is recorded hook history, not authoritative process liveness."""
+    return latest_recorded(rows)[0]
 
 
 def load_jsonl(path: Path):
@@ -188,7 +134,7 @@ def load_labels(path: Path):
 def row_key(row):
     """The dedup/identity key used everywhere a row needs to be addressed:
     /api/rows dedup, label merge, and SSE de-dup against already-seen rows."""
-    return (row.get("session_id"), row.get("agent_id"))
+    return identity_key(row)
 
 
 def _apply_label(row, labels):
@@ -255,15 +201,24 @@ class LogTailer:
     /api/rows does, and fans the resulting row dicts out to every connected
     SSE client as `event: rows` frames.
 
-    File growth is tracked by byte offset per resolved path. On startup each
-    file is baselined at its current size (no history replay over SSE --
-    /api/rows already serves the full history on initial page load).
+    File growth is tracked by byte offset, file identity, and an incomplete
+    byte fragment per resolved path. Only newline-terminated UTF-8 records are
+    parsed. On startup each file is baselined at its current size (no history
+    replay over SSE -- /api/rows already serves the full history on initial
+    page load).
     """
 
     def __init__(self, log_paths, labels_path: Path):
         self.log_paths = log_paths
         self.labels_path = labels_path
         self._offsets = {}
+        self._fragments = {}
+        self._file_ids = {}
+        self._diagnostics = {
+            "malformedRecords": 0,
+            "invalidUtf8Records": 0,
+            "nonObjectRecords": 0,
+        }
         self._clients = []
         self._clients_lock = threading.Lock()
         self._thread = None
@@ -293,6 +248,10 @@ class LogTailer:
             except Exception:
                 pass
 
+    def diagnostics(self):
+        """Return counters for complete records rejected by the tailer."""
+        return dict(self._diagnostics)
+
     def _run(self):
         while True:
             try:
@@ -308,21 +267,40 @@ class LogTailer:
         for path in files:
             key = str(path)
             try:
-                size = path.stat().st_size if path.is_file() else 0
+                stat = path.stat() if path.is_file() else None
             except OSError:
-                size = 0
+                stat = None
+            size = stat.st_size if stat is not None else 0
+            file_id = (stat.st_dev, stat.st_ino) if stat is not None else None
 
             if key not in self._offsets:
                 # First time we see this file: baseline at current size so
                 # we only stream rows appended *after* server startup.
                 self._offsets[key] = size
+                self._fragments[key] = b""
+                self._file_ids[key] = file_id
                 continue
 
             old = self._offsets[key]
-            if size < old:
-                # Truncated or rotated underneath us; reset and move on.
-                self._offsets[key] = size
+            previous_file_id = self._file_ids.get(key)
+            if stat is None:
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+                self._file_ids[key] = None
                 continue
+            if previous_file_id is not None and file_id != previous_file_id:
+                # Replacement/rotation: the new file starts a fresh byte
+                # stream and must be read from its beginning.
+                old = 0
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+            elif size < old:
+                # In-place truncate: discard bytes belonging to the old file
+                # and read any new content from byte zero.
+                old = 0
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+            self._file_ids[key] = file_id
             if size == old:
                 continue
 
@@ -334,24 +312,41 @@ class LogTailer:
             except OSError:
                 continue
 
-            text = chunk.decode("utf-8", errors="replace")
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            if not lines:
+            combined = self._fragments.get(key, b"") + chunk
+            records = combined.split(b"\n")
+            self._fragments[key] = records.pop()
+            if not records:
                 continue
 
             if labels is None:
                 labels = load_labels(self.labels_path)
 
-            new_rows = []
-            for line in lines:
+            parsed_rows = []
+            for raw_record in records:
+                raw_record = raw_record.removesuffix(b"\r")
+                if not raw_record.strip():
+                    continue
+                try:
+                    line = raw_record.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._diagnostics["invalidUtf8Records"] += 1
+                    continue
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    self._diagnostics["malformedRecords"] += 1
                     continue
                 if not isinstance(obj, dict):
+                    self._diagnostics["nonObjectRecords"] += 1
                     continue
                 row = dict(obj)
                 row["source"] = path.name
+                parsed_rows.append(row)
+
+            # Filter and collapse the chunk using the same recorded-history
+            # contract as /api/rows. The browser compares against prior state.
+            new_rows = []
+            for row in dedup_rows(parsed_rows):
                 _apply_label(row, labels)
                 new_rows.append(row)
 
@@ -438,6 +433,8 @@ def make_handler(log_paths, labels_path: Path, tailer: LogTailer):
                     self._handle_sse()
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
+            elif self.path == "/api/diagnostics":
+                self._send_json(tailer.diagnostics())
             elif self.path == "/api/export.json":
                 try:
                     rows = merged_rows(log_paths, labels_path)
@@ -631,6 +628,7 @@ PAGE_HTML = r"""<!doctype html>
   .v.refuted { color: var(--bad); border-color: var(--bad); }
   .v.inconclusive { color: var(--muted); border-color: var(--muted); border-style: dashed; }
   .v.running { color: var(--muted); border-color: var(--muted); border-style: dashed; }
+  .v.unknown-status { color: var(--warn); border-color: var(--warn); border-style: dotted; }
 
   /* second row */
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
@@ -787,22 +785,27 @@ PAGE_HTML = r"""<!doctype html>
     return isNaN(t) ? null : t;
   }
 
-  // Win-tier for the merge rule, mirroring bench/dashboard.py's
-  // dedup_rows/_status_rank: a "done" row (or a legacy row with no `status`
-  // field at all, since it predates the SubagentStart hook) always beats a
-  // "running" row for the same key.
-  function statusRank(row) {
+  // Recorded-state helpers mirror bench/recorded_state.py. Missing status is
+  // the legacy completed form; unrecognized future values remain unknown.
+  function recordedStatus(row) {
     var s = row.status;
-    if (s === undefined || s === null || s === "done") return 1;
-    if (s === "running") return 0;
-    return 1;
+    if (s === undefined || s === null) return "done";
+    if (s === "running" || s === "done") return s;
+    return "unknown";
   }
-  function isRunningRow(row) { return statusRank(row) === 0; }
-  function isDoneRow(row) { return statusRank(row) === 1; }
+  function doneTieRank(row) { return recordedStatus(row) === "done" ? 1 : 0; }
+  function isRunningRow(row) { return recordedStatus(row) === "running"; }
+  function isDoneRow(row) { return recordedStatus(row) === "done"; }
+  function isRecordable(row) {
+    return typeof row.session_id === "string" && row.session_id.trim() !== "" &&
+      typeof row.agent_id === "string" && row.agent_id.trim() !== "" &&
+      tsMillis(row) !== null;
+  }
 
   function upsertRows(list) {
     var added = [];
     list.forEach(function (r) {
+      if (!isRecordable(r)) return;
       var k = rowKey(r);
       var existing = state.byKey.get(k);
       if (!existing) {
@@ -810,22 +813,21 @@ PAGE_HTML = r"""<!doctype html>
         added.push(k);
         return;
       }
-      var newRank = statusRank(r), curRank = statusRank(existing);
+      var newRank = doneTieRank(r), curRank = doneTieRank(existing);
+      var nt = tsMillis(r), ct = tsMillis(existing);
       var take;
-      if (newRank !== curRank) {
+      if (nt !== ct) {
+        take = nt > ct;
+      } else if (newRank !== curRank) {
         take = newRank > curRank;
       } else {
-        var nt = tsMillis(r), ct = tsMillis(existing);
-        if (nt === null && ct === null) take = true;
-        else if (nt === null) take = false;
-        else if (ct === null) take = true;
-        else take = nt >= ct;
+        take = true;
       }
       if (take) {
         state.byKey.set(k, r);
-        // A running row upgraded to done in place: replay the "just
-        // arrived" enter animation as if it were newly added.
-        if (newRank > curRank) added.push(k);
+        // Replay the enter animation for a genuinely newer event or a
+        // same-time transition to the completed state.
+        if (nt > ct || newRank > curRank) added.push(k);
       }
     });
     return added;
@@ -968,6 +970,7 @@ PAGE_HTML = r"""<!doctype html>
       if (r.verdict === "refuted") { s.setAttribute("stroke", "var(--bad)"); s.setAttribute("stroke-width", "2"); s.setAttribute("fill-opacity", ".35"); }
       if (r.verdict === "inconclusive") { s.setAttribute("stroke-dasharray", "2 2"); s.setAttribute("stroke", col); s.setAttribute("fill-opacity", ".25"); }
       var running = isRunningRow(r);
+      var unknownStatus = recordedStatus(r) === "unknown";
       if (running) {
         // No end ts yet: render hollow (stroke only) at the start ts, with
         // a soft pulse (handled purely in CSS via transform/opacity).
@@ -975,15 +978,22 @@ PAGE_HTML = r"""<!doctype html>
         s.setAttribute("fill-opacity", ".15");
         s.setAttribute("stroke", col);
         s.setAttribute("stroke-width", "1.5");
+      } else if (unknownStatus) {
+        s.setAttribute("fill", "none");
+        s.setAttribute("stroke", "var(--unknown)");
+        s.setAttribute("stroke-width", "1.5");
+        s.setAttribute("stroke-dasharray", "2 2");
       }
       s.setAttribute("class", "dot" + (running ? " running" : "") + (newKeySet.has(rowKey(r)) && !reduce ? " enter" : ""));
       s.setAttribute("tabindex", "0");
-      s.setAttribute("aria-label", (r.agent_type || "") + " " + tier + " " + fmt(num(r.output_tokens)) + " output tokens " + (running ? "running" : (r.verdict || "")));
+      s.setAttribute("aria-label", (r.agent_type || "") + " " + tier + " recorded " + recordedStatus(r));
       var show = function (ev) {
         tip.hidden = false;
         tip.innerHTML = running
           ? "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + '<br><span class="v running">running</span>'
-          : "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + "<br>out " + fmt(num(r.output_tokens)) + " · msgs " + esc(r.msgs) + " · tools " + esc(r.tool_calls) + (r.verdict ? "<br>verdict " + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " · conf " + esc(r.confidence) : "") : "");
+          : unknownStatus
+            ? "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + '<br><span class="v unknown-status">recorded status unknown</span>'
+            : "<b>" + esc(r.agent_type) + "</b> · " + esc(tier) + "<br>" + esc(r.description || "") + "<br>out " + fmt(num(r.output_tokens)) + " · msgs " + esc(r.msgs) + " · tools " + esc(r.tool_calls) + (r.verdict ? "<br>verdict " + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " · conf " + esc(r.confidence) : "") : "");
         var b = svg.getBoundingClientRect();
         var pt = ev.clientX ? { x: ev.clientX - b.left, y: ev.clientY - b.top } : { x: x, y: y };
         tip.style.left = Math.min(pt.x + 12, b.width - 240) + "px";
@@ -1011,13 +1021,16 @@ PAGE_HTML = r"""<!doctype html>
     feed.innerHTML = recent.map(function (r) {
       var tier = tierOf(r);
       var running = isRunningRow(r);
+      var unknownStatus = recordedStatus(r) === "unknown";
       var verdictHtml = running
         ? '<span class="v running">running</span>'
-        : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " " + esc(r.confidence) : "") + "</span>" : "");
+        : unknownStatus
+          ? '<span class="v unknown-status">status unknown</span>'
+          : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + (r.confidence !== undefined && r.confidence !== null ? " " + esc(r.confidence) : "") + "</span>" : "");
       var smallHtml = running
         ? esc(r.description || "") + ' · <span class="running-elapsed" data-start="' + tsMillis(r) + '">running · 0s</span>'
-        : esc(r.description || "") + " · " + new Date(tsMillis(r)).toLocaleTimeString();
-      var tokHtml = running ? "" : fmt(num(r.output_tokens)) + "<br>tok";
+        : esc(r.description || "") + " · recorded " + recordedStatus(r) + " · " + new Date(tsMillis(r)).toLocaleTimeString();
+      var tokHtml = isDoneRow(r) ? fmt(num(r.output_tokens)) + "<br>tok" : "";
       return '<li' + (newKeySet.has(rowKey(r)) && !reduce ? ' class="enter"' : "") + '><span class="mark ' + tier + '"></span><span class="what">' + runtimeBadge(r) + '<b>' + esc((r.agent_type || "").replace("tierwork:", "")) + "</b>" + verdictHtml + "<small>" + smallHtml + "</small></span><span class=\"tok num\">" + tokHtml + "</span></li>";
     }).join("");
     updateRunningElapsed();
@@ -1048,8 +1061,8 @@ PAGE_HTML = r"""<!doctype html>
   function renderCost() {
     var rows = windowRows();
     var t = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 }, n = { haiku: 0, sonnet: 0, opus: 0, unknown: 0 };
-    // Running rows have no tokens or model yet; keep them out of the cost table.
-    rows.filter(function (r) { return r.status !== "running"; }).forEach(function (r) { var tier = tierOf(r); t[tier] += num(r.output_tokens); n[tier]++; });
+    // Only recorded completions contribute run and token totals.
+    rows.filter(isDoneRow).forEach(function (r) { var tier = tierOf(r); t[tier] += num(r.output_tokens); n[tier]++; });
     var tot = t.haiku + t.sonnet + t.opus + t.unknown || 1;
     var bar = $("#bar");
     bar.children[0].style.width = (t.haiku / tot * 100) + "%";
@@ -1065,7 +1078,7 @@ PAGE_HTML = r"""<!doctype html>
 
   // ---- Verdict funnel ----
   function renderFunnel() {
-    var rows = windowRows();
+    var rows = windowRows().filter(isDoneRow);
     var hunters = rows.filter(function (r) { return r.agent_type === "tierwork:bug-hunter"; }).length;
     var vals = rows.filter(function (r) { return r.agent_type === "tierwork:bug-validator"; });
     var c = vals.filter(function (r) { return r.verdict === "confirmed"; }).length;
@@ -1093,7 +1106,7 @@ PAGE_HTML = r"""<!doctype html>
 
   // ---- Runs table ----
   function labelButtonsHtml(r) {
-    if (r.agent_type !== "tierwork:bug-validator") return "";
+    if (r.agent_type !== "tierwork:bug-validator" || !isDoneRow(r)) return "";
     return '<span class="lbl-btns" data-session="' + esc(r.session_id) + '" data-agent="' + esc(r.agent_id) + '">' +
       '<button class="tp' + (r.label === "true_positive" ? " on" : "") + '" data-l="true_positive" aria-label="label true positive">TP</button>' +
       '<button class="fp' + (r.label === "false_positive" ? " on" : "") + '" data-l="false_positive" aria-label="label false positive">FP</button>' +
@@ -1107,9 +1120,12 @@ PAGE_HTML = r"""<!doctype html>
     tb.innerHTML = sorted.map(function (r) {
       var tier = tierOf(r);
       var running = isRunningRow(r);
+      var unknownStatus = recordedStatus(r) === "unknown";
       var verdictCell = running
         ? '<span class="v running">running</span>'
-        : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—");
+        : unknownStatus
+          ? '<span class="v unknown-status">status unknown</span>'
+          : (r.verdict ? '<span class="v ' + esc(r.verdict) + '">' + esc(r.verdict) + "</span>" : "—");
       return "<tr class=\"row\">" +
         '<td class="mono">' + new Date(tsMillis(r)).toLocaleTimeString() + "</td>" +
         "<td>" + runtimeBadge(r) + "</td>" +

@@ -4,32 +4,78 @@ Small A/B harness for comparing tierwork's review behavior with the plugin
 enabled vs. disabled, using two fixture repos (`small`, `medium`) with a
 known set of planted bugs.
 
-## Running one A/B pair
+## Running paired repeats
 
+Before the first paid run, copy `experiment.example.json`, choose the minimum
+pair count and claim thresholds, and keep that config unchanged for the
+experiment. Set its `maximum_total_cost_usd` to the same cap passed to
+`run-paired.sh`. Null thresholds force an `inconclusive` conclusion.
+
+```bash
+cp bench/experiment.example.json bench/experiment-my-study.json
+# edit thresholds before collecting data
+bench/run-paired.sh <experiment-id> <fixture> <repeats> <model> <max-cost-usd>
 ```
-claude plugin disable tierwork@tierwork
-bench/run.sh <label-without-tierwork> [fixture]
 
-claude plugin enable tierwork@tierwork
-bench/run.sh <label-with-tierwork> [fixture]
+`fixture` may be `small` or `medium`; repeat count, model, and a positive total
+cost cap are explicit inputs. The cap is checked after every condition run;
+missing cost data or reaching the cap stops further paid runs and leaves the
+unfinished pair visible.
+`run-paired.sh` runs `disabled` then `enabled` on odd repeats and uses the
+inverse order on even repeats to reduce fixed-order bias; it restores
+`tierwork@tierwork` to enabled on exit. Each condition gets a distinct raw
+result, stderr, location score, and metadata envelope under
+`bench/results/<experiment>/<fixture>/`. Failed condition runs still produce
+metadata and remain visible to aggregation. Use a separate experiment ID for
+an alternative policy; never pool it with the fixed-policy cohort.
+
+For manual condition control, run one condition without changing plugin state:
+
+```bash
+bench/run.sh <experiment-id> <condition> <repeat> [fixture] [model]
 ```
-
-`fixture` defaults to `small`; use `medium` for the larger fixture. Each run
-writes `bench/results/<label>.json` (the raw `claude -p --output-format
-json` payload) and prints a short summary (session_id, cost, duration,
-turns) to stdout.
 
 ## Reading results
 
-- `bench/results/*.json` — raw run output. Inspect with `jq`.
+- `bench/results/**/*.raw.json` — immutable raw Claude output; metadata stores
+  its SHA-256.
+- `*.meta.json` — fixture, condition, repeat, main model, policy revision,
+  timestamps, exit status, raw metrics, and the linked location score.
 - `bench/session_usage.sh <session_id>` — per-sub-agent breakdown (agent
   type, spawn model, actual models used), a per-model token-usage totals
   table, and any gate-agent signal lines
   (`size`/`review_tier`/`validation_tier`/`changed_files`/`changed_lines`/`stake_signals`)
   found in the session.
-- `bench/score.py bench/results/<label>.json bench/fixtures/<fixture>/ANSWER.md`
-  — compares the `file:line` bug references in the run's report text against
-  the fixture's answer key, and prints found / missed / extra.
+- `bench/score.py <raw.json> bench/fixtures/<fixture>/ANSWER.md [--json]`
+  — classifies exact/range/outside/duplicate/ambiguous location candidates.
+  Answer entries pre-register `ID|path:allowed-range|condition|expected`.
+  Location overlap never confirms semantic correctness: a reviewer must judge
+  whether the claim actually describes that defect, and same-line false claims
+  remain `semantic_review_required`. An independent reviewer can finalize the
+  score with `--judgments review.json`; every extracted reference must receive
+  `true_positive`, `false_positive`, or `unknown`, and a true positive must name
+  one of that reference's location-candidate answer IDs:
+
+  ```json
+  {
+    "reviewer": "reviewer-id",
+    "independent": true,
+    "references": [
+      {"index": 0, "verdict": "true_positive", "answer_id": "small-filter"},
+      {"index": 1, "verdict": "false_positive", "note": "wrong causal claim"}
+    ]
+  }
+  ```
+
+  Re-run the scorer with `--json --judgments review.json` into the run's same
+  `*.score.json` path. Aggregation reads the current sidecar score, so the raw
+  result and metadata envelope stay intact.
+- `bench/aggregate.py <metadata-file-or-dir> --config <experiment.json>`
+  — reports completed pair count, failed/unpaired runs, mean/median/sample
+  standard deviation, paired cost improvement, and location-recall delta.
+  It cannot return `supported` until minimum sample and cost/quality thresholds
+  were preregistered and every included score has independent semantic review
+  marked complete.
 
 ## Dashboard
 
@@ -70,10 +116,22 @@ last five minutes by default, unknown statuses, and malformed/missing/unreadable
 input diagnostics. Its merge is deliberately assignment-oriented: the newest
 valid timestamp wins for one `session_id`+`agent_id`, so a newer resumed start
 is not hidden by an older completion; a same-time completion wins a start.
-This differs from the dashboard's historical done-over-running merge and does
-not change that existing contract. Output is recorded hook status only—not
+The dashboard, exports, SSE upsert, and offline merge use the same rule. Output
+is recorded hook status only—not
 process liveness, success, result retrieval, or parent integration. Missing
-rows are inconclusive, and assignment generation is unavailable.
+rows are inconclusive, future-dated completions are diagnostic rather than
+recent, and assignment generation is unavailable.
+
+Run all stdlib regression tests from the repository root with:
+
+```bash
+python3 -m unittest discover -s bench -p 'test_*.py' -v
+```
+
+The suite covers recorded-state merging, SSE byte boundaries, status CLI
+contracts, and Claude/Codex hook fixtures, including concurrent Python-hook
+writers. Native POSIX Bash is required for
+the forced minimal-fallback fixture; that single case is skipped on Windows.
 
 `bench/dashboard.py` is a small local review dashboard for the
 `SubagentStop` data log (`~/.tierwork/reviews.jsonl` by default; see the main
@@ -93,14 +151,15 @@ determinism). With no `--log` at all it falls back to `TIERWORK_LOG` or
 `~/.tierwork/reviews.jsonl`, same as before. Rows from all resolved files are
 loaded, each tagged with a `source` field (the basename of the file it came
 from), and de-duplicated across files by `session_id`+`agent_id`. The dedup
-rule: a `"done"` row (or a legacy row with no `status` field at all, which
-predates the `SubagentStart` hook) always wins over a `"running"` row for the
-same key, regardless of `ts`; among rows sharing the same key **and** the
-same win-tier (two `"running"` rows, or two `"done"`/legacy rows), the row
-with the latest `ts` wins. This rule is applied identically by `/api/rows`,
+rule is the latest valid recorded `ts` for each key; only at the same
+timestamp does a `"done"` row (or a legacy row with no `status` field) win
+over another state. Unknown/future statuses remain unknown and are not
+counted as completed runs. Rows missing a usable identity or timestamp are
+excluded rather than guessed. This rule is applied identically by `/api/rows`,
 `/api/export.json`, `/api/export.csv`, the SSE append/broadcast logic, and
-`bench/merge.py`. `--labels` stays a single file — labels are always this
-machine's own labels file.
+`bench/merge.py`. It describes recorded hook history, not process liveness;
+assignment generation is not available and is never synthesized. `--labels`
+stays a single file — labels are always this machine's own labels file.
 
 then open the printed `http://127.0.0.1:<port>` URL. The page ("tierwork
 mission control") loads real data from `/api/rows` on open and stays live
@@ -140,19 +199,26 @@ Routes:
 - `GET /api/events` — a Server-Sent Events stream. Sends `event: hello` on
   connect, then `event: rows` with a JSON array of newly appended (and
   label-merged) rows whenever a background thread notices one of the `--log`
-  files has grown (polled once a second, byte-offset tracked per file — no
-  history replay, only rows appended after the server started). Sends a
+  files has grown. The once-per-second watcher tracks byte offset, file
+  identity, and incomplete bytes per file, and emits only newline-terminated
+  UTF-8 JSONL records. Split writes and multibyte characters are retained until
+  complete; truncate/rotation clears the old fragment. There is no history
+  replay, only rows appended after the server started. Sends a
   `: ping` comment every 15s to keep idle connections alive. The page falls
   back to polling `/api/rows` every 10s if the SSE connection drops, and
   switches back to SSE automatically on reconnect.
+- `GET /api/diagnostics` — counters for complete watcher records skipped as
+  malformed JSON, invalid UTF-8, or non-object JSON. Incomplete records are
+  pending data and are not counted as errors.
 - `GET /api/export.json` — the same merged rows as `/api/rows`, served as a
   file download (`Content-Disposition: attachment`) named
   `tierwork-export-<hostname>-<YYYYMMDD>.json`.
 - `GET /api/export.csv` — the same merged rows as CSV, fixed column order
-  `ts, session_id, agent_id, agent_type, spawn_model, models, msgs,
-  tool_calls, input_tokens, output_tokens, cache_read, cache_create,
-  verdict, confidence, needs_primary_review, proceed, description, cwd,
-  source, label, label_note, label_ts` (`models` joined with `|`; missing
+  `ts, status, session_id, agent_id, agent_type, runtime, spawn_model,
+  models, msgs, tool_calls, input_tokens, output_tokens, cache_read,
+  cache_create, verdict, confidence, check_status, needs_primary_review,
+  proceed, description, cwd, source, label, label_note, label_ts` (`models`
+  joined with `|`; missing
   fields empty), downloaded as
   `tierwork-export-<hostname>-<YYYYMMDD>.csv`.
 - `POST /api/label` — body `{"session_id", "agent_id", "label", "note"}`
@@ -216,4 +282,7 @@ to move, and `bench/merge.py`/`--log` will carry them straight through.
 
 Cost and duration vary run to run, and as of writing each configuration so
 far has n=1 (no statistical confidence). Treat any single comparison as
-anecdotal, not conclusive.
+anecdotal, not conclusive. The new paired harness has not yet been run: no
+minimum pair count or cost budget has been selected, so current evidence stays
+`inconclusive`. Raw output and location matches are reproducible inputs, not an
+automated truth oracle.

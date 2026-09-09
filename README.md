@@ -73,6 +73,8 @@ This is an example prompt, not a new slash command. The host remains responsible
 | `bug-hunter` | Two parallel lenses: diff-only and introduced logic | Opus |
 | `bug-validator` | Validate individual candidates; deterministic checks before judgment | Opus for bugs, Sonnet for compliance |
 
+Validators report `check_status: passed|failed|unavailable`. The no-reopen fast path requires `confirmed`, a passed deterministic check, and confidence ≥ 70; confidence alone does not qualify an unchecked finding.
+
 Model tiers follow **task type**, not diff size. The gate does not select a model tier. The parent retains assignment handles and distinguishes completion observed, result retrieved, and result integrated.
 
 See the [delegation skill](skills/subagent-delegation/SKILL.md), [session policy](hooks/policy.md), and [agent definitions](agents/).
@@ -105,6 +107,8 @@ python3 bench/dashboard-service.py disable
 ```
 
 The service uses launchd, Windows Task Scheduler, or a systemd user service, depending on the OS. Python 3 is required for these utilities and Codex log parsing; the Claude logging hook also has jq/minimal fallbacks. The log hook is non-blocking and may record incomplete data when a transcript or parser is unavailable.
+
+Recorded status merges use the latest valid timestamp; completion wins only on a timestamp tie. Future-dated or unknown states are not treated as completed work. The dashboard buffers incomplete JSONL records and reports rejected complete records at `/api/diagnostics`.
 
 Logs can contain project metadata and model usage. Review them before exporting or sharing. Details on routes, labels, multi-source input, and exports are in the [bench guide](bench/README.md).
 
