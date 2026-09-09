@@ -10,6 +10,34 @@ def read(relative_path):
 
 
 class PolicyContractTest(unittest.TestCase):
+    def test_task_boundaries_cover_document_workflow_regressions(self):
+        # Static prompt guards, not evidence of live model compliance.
+        scenarios = {
+            "document_contract": ["## Task-contract boundary", "mandatory stages"],
+            "pointer_access": ["when the task permits", "required content"],
+            "arbitrary_read_limit": ["Never invent read-count"],
+            "interrupted_assignment": ["Do not silently change scope or restart", "affected remainder"],
+            "changed_artifact": ["matching artifact version, scope, and assumptions", "Recheck affected claims"],
+            "reuse_reporting": ["reused versus newly performed", "executor, input version"],
+            "unavailable_evidence": ["Missing evidence means unknown, not false or absent"],
+            "self_review": ["self-review, not independent validation"],
+            "unsupported_savings": ["counterfactual savings without a comparable measurement"],
+        }
+        for path in ("hooks/policy.md", "skills/subagent-delegation/SKILL.md"):
+            text = " ".join(read(path).split())
+            for scenario, phrases in scenarios.items():
+                with self.subTest(path=path, scenario=scenario):
+                    for phrase in phrases:
+                        self.assertIn(phrase, text)
+
+    def test_optional_optimizations_do_not_replace_artifacts_or_stages(self):
+        skill = read("skills/subagent-delegation/SKILL.md")
+        self.assertIn("For optional work only", skill)
+        self.assertIn("Preserve the task's required output format and artifact writer", skill)
+        self.assertIn("For code-review findings", skill)
+        self.assertNotIn("agents never write them", skill)
+        self.assertIn("## Prompt changelog", read("README.md"))
+
     def test_validator_outputs_match_across_harnesses(self):
         claude = read("agents/bug-validator.md")
         codex = read("codex/agents/bug-validator.toml")

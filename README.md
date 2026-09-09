@@ -139,6 +139,42 @@ git diff --check
 
 The [bench guide](bench/README.md) describes the A/B harness and its limitations. Its small fixture is an intentional historical policy snapshot, not the current validator contract; keeping it unchanged preserves the meaning of previous measurements. Full live harness acceptance requires actual Claude Code and trusted-hook Codex sessions; it is not replaced by unit tests.
 
+## Prompt changelog
+
+### 0.9.1 — Task-contract boundary
+
+- Goal: prevent general delegation optimizations from changing document-workflow
+  requirements; distinguish reused checks from new verification.
+- Target: Claude Code/Codex host orchestrators and users of the shared delegation
+  skill; model-independent. No model/version change or live model acceptance run
+  accompanies this revision. Existing review-agent tiers remain unchanged.
+- Files: `hooks/policy.md`, `skills/subagent-delegation/SKILL.md`.
+- Before → after (changed guidance):
+  - “Pass intent and pointers … not bulk content” → code-review preference only;
+    preserve required inline content or accessible packets under the task contract.
+  - “a producer never verifies its own output” → independent validation stays
+    isolated; authorized primary self-review is explicitly labeled self-review.
+  - “Stop launching further sub-agents once remaining results cannot change the
+    decision” → optional work only; mandatory stages cannot be skipped.
+  - “primary agent renders artifacts and agents never write them” → preserve the
+    task's artifact writer and required format; typed output is the fallback.
+  - “do not repeat the same verification from scratch” → reuse only within the
+    recorded version/scope/assumptions; recheck affected claims after changes.
+  - Previously unspecified → no arbitrary read limits or silent scope/restart
+    changes; record interruption state and recover the affected remainder.
+  - Previously unspecified → missing evidence is unknown, not absence; latest
+    accepted corrections supersede historical restrictions.
+  - Previously unspecified → completion reports distinguish executor, input
+    version, reuse, new checks, and gaps; no unmeasured counterfactual savings.
+- Reason: an inspected document-workflow incident showed actual source reads,
+  repeated work, changing restrictions, and overstated completion. It does not
+  establish that pointers alone caused the cost or that inline input saves a
+  particular amount. No private transcript or career data is included here.
+- Validation: static contract regression checks plus the existing mechanical
+  suite. These guard prompt text, not model compliance or efficiency; live
+  document-workflow acceptance remains pending. Validator schemas and historical
+  benchmark fixtures are unchanged.
+
 ## Repository layout
 
 ```text

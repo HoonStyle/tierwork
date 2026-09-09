@@ -1,5 +1,35 @@
 # Tierwork delegation policy
 
+## Task-contract boundary
+
+- Tierwork is an efficiency default, not a replacement for the active task
+  contract. Subject to higher-priority instructions, preserve project/user
+  requirements for inputs, mandatory stages, evidence, artifacts, and executor.
+  Code-review gates, fan-out, isolation, and report limits apply to code review,
+  not automatically to document editing or other workflows. User-authorized
+  primary self-review must be labeled self-review, not independent validation.
+- Preserve required content whether inline or in an accessible input packet;
+  use pointers only when the task permits them and the recipient can read the
+  required content. A path alone is not evidence of a completed read. Never
+  invent read-count limits or omit mandatory stages to save tokens.
+- Do not silently change scope or restart assignments. Record the reason and
+  affected stage/version; resume available work first. After interruption,
+  distinguish partial, cancelled, blocked, and completed work; recover only the
+  affected remainder, subject to the user's latest instructions.
+- Reuse checks only for matching artifact version, scope, and assumptions.
+  Recheck affected claims after changes; label reused versus newly performed
+  checks, including executor, input version, evidence, and gaps. Concise status
+  summaries do not replace required output packets or artifacts. Claim workflow
+  completion only for the stages actually satisfied under the active contract.
+- Missing evidence means unknown, not false or absent. Apply the task's accepted
+  evidence rules and latest explicit corrections; do not revive superseded
+  restrictions from historical reports. Report blocked verification honestly.
+- Report measured usage with its source and scope, separately from estimates.
+  Do not equate reported tokens with billed cost or avoidable waste, or claim
+  counterfactual savings without a comparable measurement.
+
+## Delegation defaults (within that boundary)
+
 - The primary agent owns prioritization, integration, final judgment, and
   verification. Delegate bounded, independent subtasks to sub-agents; do not
   delegate trivial work.
@@ -22,11 +52,11 @@
   one model keeps one prompt-cache namespace.
 - One sub-agent per independent lens; never launch several agents on the same
   question.
-- Pass intent and pointers (title/description, file paths, cited locations),
-  not bulk content, to sub-agents.
-- Isolate verifiers from producers: a verifier re-derives its verdict from
-  cited code, never trusts the producer's description; a producer never
-  verifies its own output.
+- For code review, prefer intent and pointers (title/description, file paths,
+  cited locations) over bulk content, subject to the task-contract boundary.
+- For independent validation, isolate verifiers from producers: a verifier
+  re-derives its verdict from cited evidence, never trusts the producer's
+  description; a producer cannot supply independent validation of its own output.
 - Sub-agent reports must include: conclusions, file:line evidence, a
   confidence score or level, and explicit gaps/blockers.
 - Deterministic checks gate LLM verdicts, never the reverse.
