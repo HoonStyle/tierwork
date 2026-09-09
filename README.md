@@ -1,5 +1,10 @@
 # tierwork
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude_Code-plugin-D97757)](#claude-code)
+[![Codex plugin](https://img.shields.io/badge/Codex-plugin-000000)](#codex)
+[![Python 3 utilities](https://img.shields.io/badge/Python-3_utilities-3776AB?logo=python&logoColor=white)](#logs-and-dashboard)
+
 Task-based model delegation and review logging for Claude Code and OpenAI Codex CLI.
 
 Tierwork provides a delegation skill, review-agent definitions, lifecycle hooks, and a local dashboard. It helps assign review work to model tiers and track the resulting runs. It does **not** independently schedule agents or guarantee lower cost or better findings.
