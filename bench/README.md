@@ -69,14 +69,15 @@ determinism). With no `--log` at all it falls back to `TIERWORK_LOG` or
 `~/.tierwork/reviews.jsonl`, same as before. Rows from all resolved files are
 loaded, each tagged with a `source` field (the basename of the file it came
 from), and de-duplicated across files by `session_id`+`agent_id`. The dedup
-rule: a `"done"` row (or a legacy row with no `status` field at all, which
-predates the `SubagentStart` hook) always wins over a `"running"` row for the
-same key, regardless of `ts`; among rows sharing the same key **and** the
-same win-tier (two `"running"` rows, or two `"done"`/legacy rows), the row
-with the latest `ts` wins. This rule is applied identically by `/api/rows`,
+rule is the latest valid recorded `ts` for each key; only at the same
+timestamp does a `"done"` row (or a legacy row with no `status` field) win
+over another state. Unknown/future statuses remain unknown and are not
+counted as completed runs. Rows missing a usable identity or timestamp are
+excluded rather than guessed. This rule is applied identically by `/api/rows`,
 `/api/export.json`, `/api/export.csv`, the SSE append/broadcast logic, and
-`bench/merge.py`. `--labels` stays a single file — labels are always this
-machine's own labels file.
+`bench/merge.py`. It describes recorded hook history, not process liveness;
+assignment generation is not available and is never synthesized. `--labels`
+stays a single file — labels are always this machine's own labels file.
 
 then open the printed `http://127.0.0.1:<port>` URL. The page ("tierwork
 mission control") loads real data from `/api/rows` on open and stays live
@@ -125,10 +126,11 @@ Routes:
   file download (`Content-Disposition: attachment`) named
   `tierwork-export-<hostname>-<YYYYMMDD>.json`.
 - `GET /api/export.csv` — the same merged rows as CSV, fixed column order
-  `ts, session_id, agent_id, agent_type, spawn_model, models, msgs,
-  tool_calls, input_tokens, output_tokens, cache_read, cache_create,
-  verdict, confidence, needs_primary_review, proceed, description, cwd,
-  source, label, label_note, label_ts` (`models` joined with `|`; missing
+  `ts, status, session_id, agent_id, agent_type, runtime, spawn_model,
+  models, msgs, tool_calls, input_tokens, output_tokens, cache_read,
+  cache_create, verdict, confidence, check_status, needs_primary_review,
+  proceed, description, cwd, source, label, label_note, label_ts` (`models`
+  joined with `|`; missing
   fields empty), downloaded as
   `tierwork-export-<hostname>-<YYYYMMDD>.csv`.
 - `POST /api/label` — body `{"session_id", "agent_id", "label", "note"}`

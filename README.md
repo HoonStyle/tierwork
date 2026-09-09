@@ -185,8 +185,8 @@ treated as possibly absent/missing without raising an error.
   for moving between machines; `bench/merge.py` merges exported/raw logs from
   multiple machines into one de-duped JSONL file. As of 0.6.1 it also
   understands the `SubagentStart` hook's `status: "running"` rows: a
-  `"done"` (or legacy, no-`status`) row always wins the merge over a
-  `"running"` row for the same key, else the latest `ts` wins; in-flight runs
+  row with the latest valid `ts` wins for the same key, with `"done"` (or
+  legacy, no-`status`) winning only when timestamps tie; in-flight runs
   render as a pulsing hollow swimlane mark, a live-feed "running · Xs" line,
   and a dashed "running" verdict chip, are excluded from the "Sub-agent
   runs" KPI, and are counted in a new "in flight: N" status line. See
@@ -335,6 +335,13 @@ This scenario is **not yet live-verified** for either harness.
   intentional historical policy snapshot so previous measurements are not
   silently redefined. Rationale: confidence measures judgment strength, while
   check availability is an independent safety condition.
+  Aligned status merging across the one-shot status view, dashboard/API,
+  exports, SSE updates, and offline merge: latest valid timestamp wins and a
+  recorded completion wins only at the same timestamp. Unknown/future statuses
+  remain unknown and are excluded from completed-run metrics; invalid identity
+  or timestamp rows are skipped with diagnostics where the status CLI exposes
+  them. This remains recorded hook history, not authoritative process liveness,
+  and no assignment generation is synthesized.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment
