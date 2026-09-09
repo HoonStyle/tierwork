@@ -106,7 +106,7 @@ python3 bench/dashboard-service.py status
 python3 bench/dashboard-service.py disable
 ```
 
-The service uses launchd, Windows Task Scheduler, or a systemd user service, depending on the OS. Python 3 is required for these utilities and Codex log parsing; the Claude logging hook also has jq/minimal fallbacks. The log hook is non-blocking and may record incomplete data when a transcript or parser is unavailable.
+The service uses launchd, Windows Task Scheduler, or a systemd user service, depending on the OS. Python 3 is required for these utilities and Codex log parsing; the Claude logging hook also has jq/minimal fallbacks. The log hook is non-blocking and may record incomplete data when a transcript or parser is unavailable. The no-Python/no-jq minimal fallback records lifecycle identity and status only, not validator check results.
 
 Recorded status merges use the latest valid timestamp; completion wins only on a timestamp tie. Future-dated or unknown states are not treated as completed work. The dashboard buffers incomplete JSONL records and reports rejected complete records at `/api/diagnostics`.
 
@@ -132,7 +132,7 @@ claude plugin validate .
 git diff --check
 ```
 
-The [bench guide](bench/README.md) describes the A/B harness and its limitations. Full live harness acceptance requires actual Claude Code and trusted-hook Codex sessions; it is not replaced by unit tests.
+The [bench guide](bench/README.md) describes the A/B harness and its limitations. Its small fixture is an intentional historical policy snapshot, not the current validator contract; keeping it unchanged preserves the meaning of previous measurements. Full live harness acceptance requires actual Claude Code and trusted-hook Codex sessions; it is not replaced by unit tests.
 
 ## Repository layout
 
