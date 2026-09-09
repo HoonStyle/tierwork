@@ -117,11 +117,17 @@ Routes:
 - `GET /api/events` — a Server-Sent Events stream. Sends `event: hello` on
   connect, then `event: rows` with a JSON array of newly appended (and
   label-merged) rows whenever a background thread notices one of the `--log`
-  files has grown (polled once a second, byte-offset tracked per file — no
-  history replay, only rows appended after the server started). Sends a
+  files has grown. The once-per-second watcher tracks byte offset, file
+  identity, and incomplete bytes per file, and emits only newline-terminated
+  UTF-8 JSONL records. Split writes and multibyte characters are retained until
+  complete; truncate/rotation clears the old fragment. There is no history
+  replay, only rows appended after the server started. Sends a
   `: ping` comment every 15s to keep idle connections alive. The page falls
   back to polling `/api/rows` every 10s if the SSE connection drops, and
   switches back to SSE automatically on reconnect.
+- `GET /api/diagnostics` — counters for complete watcher records skipped as
+  malformed JSON, invalid UTF-8, or non-object JSON. Incomplete records are
+  pending data and are not counted as errors.
 - `GET /api/export.json` — the same merged rows as `/api/rows`, served as a
   file download (`Content-Disposition: attachment`) named
   `tierwork-export-<hostname>-<YYYYMMDD>.json`.

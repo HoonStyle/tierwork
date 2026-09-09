@@ -18,6 +18,7 @@ Routes:
                        (by session_id+agent_id) from the labels file
     GET  /api/events  Server-Sent Events stream of newly appended rows,
                        polled from the --log file(s) every second
+    GET  /api/diagnostics  skipped complete-record counters for the watcher
     POST /api/label   body {"session_id", "agent_id", "label", "note"};
                        appends one JSON line to the labels file
 
@@ -200,15 +201,24 @@ class LogTailer:
     /api/rows does, and fans the resulting row dicts out to every connected
     SSE client as `event: rows` frames.
 
-    File growth is tracked by byte offset per resolved path. On startup each
-    file is baselined at its current size (no history replay over SSE --
-    /api/rows already serves the full history on initial page load).
+    File growth is tracked by byte offset, file identity, and an incomplete
+    byte fragment per resolved path. Only newline-terminated UTF-8 records are
+    parsed. On startup each file is baselined at its current size (no history
+    replay over SSE -- /api/rows already serves the full history on initial
+    page load).
     """
 
     def __init__(self, log_paths, labels_path: Path):
         self.log_paths = log_paths
         self.labels_path = labels_path
         self._offsets = {}
+        self._fragments = {}
+        self._file_ids = {}
+        self._diagnostics = {
+            "malformedRecords": 0,
+            "invalidUtf8Records": 0,
+            "nonObjectRecords": 0,
+        }
         self._clients = []
         self._clients_lock = threading.Lock()
         self._thread = None
@@ -238,6 +248,10 @@ class LogTailer:
             except Exception:
                 pass
 
+    def diagnostics(self):
+        """Return counters for complete records rejected by the tailer."""
+        return dict(self._diagnostics)
+
     def _run(self):
         while True:
             try:
@@ -253,21 +267,40 @@ class LogTailer:
         for path in files:
             key = str(path)
             try:
-                size = path.stat().st_size if path.is_file() else 0
+                stat = path.stat() if path.is_file() else None
             except OSError:
-                size = 0
+                stat = None
+            size = stat.st_size if stat is not None else 0
+            file_id = (stat.st_dev, stat.st_ino) if stat is not None else None
 
             if key not in self._offsets:
                 # First time we see this file: baseline at current size so
                 # we only stream rows appended *after* server startup.
                 self._offsets[key] = size
+                self._fragments[key] = b""
+                self._file_ids[key] = file_id
                 continue
 
             old = self._offsets[key]
-            if size < old:
-                # Truncated or rotated underneath us; reset and move on.
-                self._offsets[key] = size
+            previous_file_id = self._file_ids.get(key)
+            if stat is None:
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+                self._file_ids[key] = None
                 continue
+            if previous_file_id is not None and file_id != previous_file_id:
+                # Replacement/rotation: the new file starts a fresh byte
+                # stream and must be read from its beginning.
+                old = 0
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+            elif size < old:
+                # In-place truncate: discard bytes belonging to the old file
+                # and read any new content from byte zero.
+                old = 0
+                self._offsets[key] = 0
+                self._fragments[key] = b""
+            self._file_ids[key] = file_id
             if size == old:
                 continue
 
@@ -279,21 +312,32 @@ class LogTailer:
             except OSError:
                 continue
 
-            text = chunk.decode("utf-8", errors="replace")
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            if not lines:
+            combined = self._fragments.get(key, b"") + chunk
+            records = combined.split(b"\n")
+            self._fragments[key] = records.pop()
+            if not records:
                 continue
 
             if labels is None:
                 labels = load_labels(self.labels_path)
 
             parsed_rows = []
-            for line in lines:
+            for raw_record in records:
+                raw_record = raw_record.removesuffix(b"\r")
+                if not raw_record.strip():
+                    continue
+                try:
+                    line = raw_record.decode("utf-8")
+                except UnicodeDecodeError:
+                    self._diagnostics["invalidUtf8Records"] += 1
+                    continue
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    self._diagnostics["malformedRecords"] += 1
                     continue
                 if not isinstance(obj, dict):
+                    self._diagnostics["nonObjectRecords"] += 1
                     continue
                 row = dict(obj)
                 row["source"] = path.name
@@ -389,6 +433,8 @@ def make_handler(log_paths, labels_path: Path, tailer: LogTailer):
                     self._handle_sse()
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
+            elif self.path == "/api/diagnostics":
+                self._send_json(tailer.diagnostics())
             elif self.path == "/api/export.json":
                 try:
                     rows = merged_rows(log_paths, labels_path)

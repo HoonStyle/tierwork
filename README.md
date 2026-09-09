@@ -342,6 +342,10 @@ This scenario is **not yet live-verified** for either harness.
   or timestamp rows are skipped with diagnostics where the status CLI exposes
   them. This remains recorded hook history, not authoritative process liveness,
   and no assignment generation is synthesized.
+  The dashboard SSE watcher now retains incomplete JSONL bytes per file and
+  parses only newline-terminated UTF-8 records. Split appends, multibyte splits,
+  CRLF, truncate, and file replacement are covered by deterministic tests;
+  rejected complete records are counted at `/api/diagnostics`.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment
