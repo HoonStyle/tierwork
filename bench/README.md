@@ -46,10 +46,22 @@ last five minutes by default, unknown statuses, and malformed/missing/unreadable
 input diagnostics. Its merge is deliberately assignment-oriented: the newest
 valid timestamp wins for one `session_id`+`agent_id`, so a newer resumed start
 is not hidden by an older completion; a same-time completion wins a start.
-This differs from the dashboard's historical done-over-running merge and does
-not change that existing contract. Output is recorded hook status only—not
+The dashboard, exports, SSE upsert, and offline merge use the same rule. Output
+is recorded hook status only—not
 process liveness, success, result retrieval, or parent integration. Missing
-rows are inconclusive, and assignment generation is unavailable.
+rows are inconclusive, future-dated completions are diagnostic rather than
+recent, and assignment generation is unavailable.
+
+Run all stdlib regression tests from the repository root with:
+
+```bash
+python3 -m unittest discover -s bench -p 'test_*.py' -v
+```
+
+The suite covers recorded-state merging, SSE byte boundaries, status CLI
+contracts, and Claude/Codex hook fixtures, including concurrent Python-hook
+writers. Native POSIX Bash is required for
+the forced minimal-fallback fixture; that single case is skipped on Windows.
 
 `bench/dashboard.py` is a small local review dashboard for the
 `SubagentStop` data log (`~/.tierwork/reviews.jsonl` by default; see the main

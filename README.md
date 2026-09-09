@@ -166,7 +166,8 @@ treated as possibly absent/missing without raising an error.
   This is recorded hook state, not authoritative process liveness or proof
   that the parent retrieved or integrated a result. Its newest-event merge
   prevents an older done row from hiding a newer resumed start; assignment
-  generation is still unavailable.
+  generation is still unavailable. Future-dated records are excluded from the
+  state lists and counted in diagnostics.
 - **Status: new, not yet used for a real labeling pass.** `bench/dashboard.py`
   serves a local, browser-based "mission control" view of the same log — a
   KPI strip, review swimlanes, a live feed, a tier cost bar, a verdict
@@ -346,6 +347,15 @@ This scenario is **not yet live-verified** for either harness.
   parses only newline-terminated UTF-8 records. Split appends, multibyte splits,
   CRLF, truncate, and file replacement are covered by deterministic tests;
   rejected complete records are counted at `/api/diagnostics`.
+  Expanded stdlib regression coverage for timezone/tie/filter/recency/CLI
+  status behavior and for Claude/Codex hook parsing, transcript attribution,
+  missing input, and concurrent appends. Codex rollout fallback now verifies
+  `session_meta.payload.id` instead of trusting a filename substring, and the
+  Python hook serializes concurrent writers with a bounded one-second
+  `<log>.lock` sidecar lock (then silently gives up, preserving hook
+  non-blocking behavior). The minimal Bash
+  fallback fixture is intentionally skipped on Windows because it requires a
+  native POSIX Bash environment; Bash syntax is still checked there.
 
 - 0.8.0 (2026-09-09): added a bounded harness-supervision lifecycle to the
   delegation skill and SessionStart policy. Parents now retain assignment

@@ -70,14 +70,18 @@ def build_status(rows, diagnostics, *, session=None, agent=None, recent_seconds=
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     running, completed, unknown = [], [], []
+    future_timestamps = 0
     for row in deduped:
         status = recorded_status(row)
         item = compact(row)
+        age = (current - parse_ts(row.get("ts"))).total_seconds()
+        if age < 0:
+            future_timestamps += 1
+            continue
         if status == "running":
             running.append(item)
         elif status == "done":
-            age = (current - parse_ts(row.get("ts"))).total_seconds()
-            if 0 <= age <= recent_seconds:
+            if age <= recent_seconds:
                 completed.append(item)
         else:
             unknown.append(item)
@@ -94,7 +98,12 @@ def build_status(rows, diagnostics, *, session=None, agent=None, recent_seconds=
         "inFlight": sorted(running, key=key, reverse=True),
         "recentlyCompleted": sorted(completed, key=key, reverse=True),
         "unknownStatus": sorted(unknown, key=key, reverse=True),
-        "diagnostics": {**diagnostics, **skipped, "validLatestAssignments": len(deduped)},
+        "diagnostics": {
+            **diagnostics,
+            **skipped,
+            "futureTimestamps": future_timestamps,
+            "validLatestAssignments": len(deduped),
+        },
     }
 
 
@@ -110,7 +119,7 @@ def render_text(payload):
         for item in payload[key]:
             lines.append(f"- {item['runtime']} {item['agentType']} session={item['sessionId']} agent={item['agentId']} at={item['recordedAt']}")
     diag = payload["diagnostics"]
-    lines.append(f"\nSkipped: identity={diag['invalidIdentity']} timestamp={diag['invalidTimestamp']} malformed={diag['malformedLines']} unreadable={diag['unreadableFiles']} missing={diag['missingFiles']}")
+    lines.append(f"\nSkipped: identity={diag['invalidIdentity']} timestamp={diag['invalidTimestamp']} future={diag['futureTimestamps']} malformed={diag['malformedLines']} unreadable={diag['unreadableFiles']} missing={diag['missingFiles']}")
     lines.append("A done record triggers harness-native result retrieval; it is not proof the result was collected.")
     return "\n".join(lines)
 

@@ -354,8 +354,12 @@ main() {
   # Debug aid: TIERWORK_DEBUG_STDIN=<file> appends the raw hook input there.
   [ -n "${TIERWORK_DEBUG_STDIN:-}" ] && printf '%s\n' "$input" >> "$TIERWORK_DEBUG_STDIN" 2>/dev/null
 
+  # Test-only branch forcing keeps fallback fixtures deterministic on hosts
+  # that happen to have Python or jq installed. Production leaves it unset.
+  local test_fallback="${TIERWORK_TEST_FALLBACK:-}"
+
   local py
-  if py="$(find_python)"; then
+  if [ -z "$test_fallback" ] && py="$(find_python)"; then
     # shellcheck disable=SC2086  # $py may be "py -3"; intentionally unquoted
     printf '%s' "$input" | $py "$DIR/log-subagent.py" >/dev/null 2>&1
     return 0
@@ -372,7 +376,9 @@ main() {
 
   case "$hook_event_name" in
     SubagentStart)
-      if command -v jq >/dev/null 2>&1; then
+      if [ "$test_fallback" = "minimal" ]; then
+        run_minimal_start "$input"
+      elif command -v jq >/dev/null 2>&1; then
         run_jq_start "$input"
       else
         run_minimal_start "$input"
@@ -380,7 +386,9 @@ main() {
       return 0
       ;;
     SubagentStop)
-      if command -v jq >/dev/null 2>&1; then
+      if [ "$test_fallback" = "minimal" ]; then
+        run_minimal "$input"
+      elif command -v jq >/dev/null 2>&1; then
         run_jq "$input"
       else
         run_minimal "$input"
