@@ -154,6 +154,16 @@ The [bench guide](bench/README.md) describes the A/B harness and its limitations
 
 ## Prompt changelog
 
+### 0.10.0 — Unified local dashboard
+
+- Bundle Plugin Desk for Greplet search/index status, Legacy Spec documents,
+  and Tierwork agent records, with separate tool views and a combined overview.
+- Add an event-driven dinosaur runner with continuous running, queued jumps,
+  a jump counter, preview, and counter reset.
+- Keep data read-only and mark unverified cross-tool linkage explicitly.
+- Validation: eight dashboard tests pass; local data connections and runner
+  controls were checked. Delegation prompts and model selection are unchanged.
+
 ### 0.9.1 — Task-contract boundary
 
 - Goal: prevent general delegation optimizations from changing document-workflow
