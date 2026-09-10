@@ -84,6 +84,19 @@ Model tiers follow **task type**, not diff size. The gate does not select a mode
 
 See the [delegation skill](skills/subagent-delegation/SKILL.md), [session policy](hooks/policy.md), and [agent definitions](agents/).
 
+## Unified local dashboard
+
+The bundled [Plugin Desk](dashboard/README.md) shows Greplet search/index status,
+Legacy Spec documents, and Tierwork agent records in one local dashboard, with
+specialized views for each tool and an event-driven dinosaur runner.
+No separate dashboard installation or npm dependencies are needed. With Node.js
+22 or later, run `node dashboard/server.mjs` from this repository and open
+`http://127.0.0.1:8787`. Configure source paths in `dashboard/config.json`;
+the default expects `legacy-spec-agent` beside the Tierwork checkout and Greplet
+at `http://127.0.0.1:7802`. The existing Python review dashboard remains available.
+
+Validate with `node --test dashboard/test.mjs dashboard/test-ui.mjs`.
+
 ## Logs and dashboard
 
 Run the following from the tierwork checkout:
