@@ -4,6 +4,19 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 const root=path.dirname(fileURLToPath(import.meta.url));
+export function resolveSpecDir(configValue, argv=[], env={}, cwd=process.cwd(), configDir=root) {
+  let option;
+  for(let i=0;i<argv.length;i++){
+    if(argv[i]!=='--spec-dir')throw Error(`Unknown option: ${argv[i]}`);
+    if(option!==undefined)throw Error('Specify --spec-dir only once');
+    option=argv[++i];
+    if(!option?.trim()||option.startsWith('--'))throw Error('--spec-dir requires a directory path');
+  }
+  const override=option??(env.TIERWORK_SPEC_DIR?.trim()?env.TIERWORK_SPEC_DIR:undefined);
+  const value=override??configValue;
+  if(typeof value!=='string'||!value.trim())throw Error('Set --spec-dir or TIERWORK_SPEC_DIR to your generated-spec directory');
+  return path.resolve(override===undefined?configDir:cwd, value.startsWith('~/')?path.join(os.homedir(),value.slice(2)):value);
+}
 export function latestRows(rows, now=Date.now()) {
   const map=new Map(); let skipped=0;
   for(const r of rows){
@@ -25,7 +38,7 @@ async function remote(base,route){try{const res=await fetch(new URL(route,base),
 export async function snapshot(config){
   const [status,workspaces,activity]=await Promise.all(['/api/status','/api/workspaces','/api/activity'].map(r=>remote(config.grepletUrl,r)));
   const dir=resolve(config.specDir);let documents=[],specError=null;
-  try{for(const entry of await readdir(dir,{withFileTypes:true})){if(entry.isFile()&&/\.(md|html|json|jsonl)$/i.test(entry.name)){const s=await stat(path.join(dir,entry.name));documents.push({name:entry.name,bytes:s.size,modified:s.mtime.toISOString()});}}documents.sort((a,b)=>b.modified.localeCompare(a.modified));}catch(e){specError=e.message;}
+  try{for(const entry of await readdir(dir,{withFileTypes:true})){if(entry.isFile()&&/\.(md|html|json|jsonl)$/i.test(entry.name)){const s=await stat(path.join(dir,entry.name));documents.push({name:entry.name,bytes:s.size,modified:s.mtime.toISOString()});}}documents.sort((a,b)=>b.modified.localeCompare(a.modified));}catch(e){specError=`문서 폴더를 읽을 수 없습니다: ${dir} (${e.code||e.message}). 실행 시 --spec-dir "실제 generated-spec 폴더의 절대 경로" 또는 TIERWORK_SPEC_DIR 환경변수를 지정하세요. 캐시의 config.json은 수정할 필요가 없습니다.`;}
   const audit=await jsonl(path.join(dir,'audit_log.jsonl'));
   const logs=await Promise.all(config.tierworkLogs.map(async p=>({path:resolve(p),...await jsonl(resolve(p))})));
   const merged=latestRows(logs.flatMap(l=>l.rows));
@@ -33,6 +46,7 @@ export async function snapshot(config){
 }
 async function main(){
  const config=JSON.parse(await readFile(path.join(root,'config.json'),'utf8'));
+ config.specDir=resolveSpecDir(config.specDir,process.argv.slice(2),process.env);
  const upstream=new URL(config.grepletUrl);if(!['127.0.0.1','localhost','[::1]'].includes(upstream.hostname)||upstream.protocol!=='http:')throw Error('grepletUrl must be local HTTP');
  let cached=null,pending=null;
  const server=http.createServer(async(req,res)=>{

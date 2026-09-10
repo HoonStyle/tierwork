@@ -93,7 +93,11 @@ No separate dashboard installation or npm dependencies are needed. With Node.js
 22 or later, run `node dashboard/server.mjs` from this repository and open
 `http://127.0.0.1:8787`. Configure source paths in `dashboard/config.json`;
 the default expects `legacy-spec-agent` beside the Tierwork checkout and Greplet
-at `http://127.0.0.1:7802`. The existing Python review dashboard remains available.
+at `http://127.0.0.1:7802`. In an installed plugin cache, pass
+`--spec-dir "<absolute path to generated-spec>"` or set `TIERWORK_SPEC_DIR`
+instead of editing cached files. CLI/environment relative paths use the working
+directory; config paths use the dashboard directory. The existing Python review
+dashboard remains available.
 
 Validate with `node --test dashboard/test.mjs dashboard/test-ui.mjs`.
 
@@ -153,6 +157,16 @@ git diff --check
 The [bench guide](bench/README.md) describes the A/B harness and its limitations. Its small fixture is an intentional historical policy snapshot, not the current validator contract; keeping it unchanged preserves the meaning of previous measurements. Full live harness acceptance requires actual Claude Code and trusted-hook Codex sessions; it is not replaced by unit tests.
 
 ## Prompt changelog
+
+### 0.10.1 — Dashboard paths in installed caches
+
+- Add `--spec-dir` and `TIERWORK_SPEC_DIR` overrides so installed caches can
+  read Legacy Spec documents without modifying bundled configuration.
+- Resolve CLI/environment relative paths from the working directory and retain
+  dashboard-relative paths for bundled configuration.
+- Show actionable setup guidance when the document directory cannot be read.
+- Validation: ten dashboard tests pass, including override precedence and
+  invalid options; real document lookup and missing-directory guidance checked.
 
 ### 0.10.0 — Unified local dashboard
 

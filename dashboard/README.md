@@ -11,7 +11,22 @@ Greplet, Legacy Spec Agent, Tierwork의 로컬 조회 대시보드. Node.js 22 �
 - Legacy Spec: `generated-spec`의 결과 파일 목록, 안전한 텍스트 미리보기, 감사 기록을 조회합니다. 기존 결과가 현재 코드와 일치함을 보증하지 않습니다.
 - Tierwork: JSONL 로그의 최신 `(session_id, agent_id)` 기록을 표시합니다. 실제 프로세스 상태가 아닙니다. 토큰 누락은 0으로 계산하지 않습니다.
 
-`config.json`에서 Greplet 주소, 문서 폴더, Tierwork 로그 목록, 포트를 변경한 뒤 서버를 재시작하세요. 상대 경로는 이 폴더 기준입니다. Tierwork 기본 경로는 `~/.tierwork/reviews.jsonl`이며 `TIERWORK_LOG`를 사용한다면 해당 경로로 수정하세요.
+설치된 플러그인 캐시에서 실행할 때는 캐시 파일을 수정하지 말고 실제 문서 경로를 지정하세요:
+
+```powershell
+node dashboard/server.mjs --spec-dir "D:\Dev\legacy-spec-agent\generated-spec"
+```
+
+환경변수로도 지정할 수 있습니다:
+
+```powershell
+$env:TIERWORK_SPEC_DIR = 'D:\Dev\legacy-spec-agent\generated-spec'
+node dashboard/server.mjs
+```
+
+캐시의 `dashboard` 폴더 안에서는 `node server.mjs --spec-dir "실제 문서 경로"`, npm을 사용할 때는 `npm start -- --spec-dir "실제 문서 경로"`로 실행합니다. 우선순위는 **실행 옵션 → TIERWORK_SPEC_DIR → config.json**입니다. 실행 옵션·환경변수의 상대 경로는 명령을 실행한 작업 폴더 기준이며, config.json의 상대 경로는 dashboard 폴더 기준입니다. 기본값은 개발용 형제 저장소 배치만 지원하므로 설치 캐시에서는 실제 경로를 지정해야 합니다. 폴더가 없거나 읽을 수 없으면 Legacy Spec 패널에 경로와 설정 방법이 표시됩니다.
+
+`config.json`에서 Greplet 주소, 문서 폴더, Tierwork 로그 목록, 포트를 변경할 수도 있습니다. 설정 변경 후 서버를 재시작하세요. Tierwork 기본 경로는 `~/.tierwork/reviews.jsonl`이며 `TIERWORK_LOG`를 사용한다면 해당 경로로 수정하세요.
 
 서버는 127.0.0.1에만 바인딩하며 데이터 조회만 수행합니다. 5초 자동 갱신, 문서 미리보기 최대 2 MB. HTML도 실행하지 않고 원문으로 표시합니다. 파일 부재, API 오류, 손상된 로그는 별도 표시합니다. 원본 플러그인을 수정하거나 분석 작업을 시작하지 않습니다.
 
